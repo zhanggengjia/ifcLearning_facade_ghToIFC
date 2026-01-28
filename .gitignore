@@ -1,0 +1,17 @@
+# big binaries
+*.3dm
+*.ifc
+*.ifczip
+
+# common junk
+*.bak
+*.rhl
+*.tmp
+*.3dmbak
+
+# python cache
+__pycache__/
+*.pyc
+
+# rhino/gh caches (視你的資料夾結構調整)
+.rhino/
