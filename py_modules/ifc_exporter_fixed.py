@@ -47,7 +47,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ifc_types import Payload
 
-
 # ---------------------------------------------------------------------
 # Public API (DO NOT CHANGE signature)
 # ---------------------------------------------------------------------
@@ -70,6 +69,22 @@ def export_ifc_from_matdata(
         import ifcopenshell  # type: ignore
         from ifcopenshell.api import run as ifc_run  # type: ignore
 
+        from ifc_color_csv import load_color_map_csv_with_diag, resolve_view_color
+
+        import Grasshopper as gh
+        gh_path = gh.Instances.ActiveCanvas.Document.FilePath
+        proj_dir = os.path.dirname(gh_path) if gh_path else os.getcwd()
+        csv_path = os.path.join(proj_dir, "py_modules", "colorList.csv")
+
+        COLOR_MAP, diag = load_color_map_csv_with_diag(csv_path)
+
+        Log += f"[Color] csv_path = {csv_path}\n"
+        Log += f"[Color] diag = {diag}\n"
+        Log += f"[Color] entries = {len(COLOR_MAP)}\n"
+
+        DEFAULT_VIEW_COLOR = (0.75, 0.75, 0.75)
+        STYLE_CACHE = {}
+
         # ---------------------------------------------------------------------
         # Debug helpers
         # ---------------------------------------------------------------------
@@ -81,6 +96,10 @@ def export_ifc_from_matdata(
                     return str(type(x))
                 except Exception:
                     return "<unknown-type>"
+
+        def log_add(s: str) -> None:
+            nonlocal Log
+            Log += s
 
         # ---------------------------------------------------------------------
         # OutPath normalization
@@ -312,6 +331,66 @@ def export_ifc_from_matdata(
             return verts, faces
 
         # ---------------------------------------------------------------------
+        # Viewer Color setup
+        # ---------------------------------------------------------------------
+
+        def apply_view_color(model, shape_rep, rgb, style_cache=None):
+            """
+            IFC4 viewer color (BIMVision-friendly for Brep):
+            - Changed to use IfcSurfaceStyleShading instead of Rendering for max compatibility.
+            - Attach IfcStyledItem to:
+                1) representation item itself
+                2) if item is IfcFacetedBrep: ALSO attach to its Outer shell (IfcClosedShell)
+            """
+            try:
+                r, g, b = float(rgb[0]), float(rgb[1]), float(rgb[2])
+            except Exception:
+                return False, "invalid rgb"
+
+            cache = style_cache if isinstance(style_cache, dict) else None
+            key = (round(r, 6), round(g, 6), round(b, 6))
+
+            try:
+                psa = cache.get(key) if cache is not None else None
+                if psa is None:
+                    colour = model.create_entity("IfcColourRgb", None, r, g, b)
+
+                    # [FIXED FOR BIMVISION]
+                    # Use IfcSurfaceStyleShading. BIMVision handles Shading reliably.
+                    # Rendering often fails if not fully defined.
+                    shading = model.create_entity(
+                        "IfcSurfaceStyleShading",
+                        colour
+                    )
+
+                    surf_style = model.create_entity("IfcSurfaceStyle", None, "BOTH", [shading])
+                    psa = model.create_entity("IfcPresentationStyleAssignment", [surf_style])
+
+                    if cache is not None:
+                        cache[key] = psa
+
+                items = getattr(shape_rep, "Items", None) or []
+                for it in items:
+                    # 1) style the item itself
+                    try:
+                        model.create_entity("IfcStyledItem", it, [psa], None)
+                    except Exception:
+                        pass
+
+                    # 2) if Brep: style its outer shell too (BIMVision often reads here)
+                    try:
+                        if it.is_a("IfcFacetedBrep") and hasattr(it, "Outer") and it.Outer:
+                            model.create_entity("IfcStyledItem", it.Outer, [psa], None)
+                    except Exception:
+                        pass
+
+                return True, ""
+            except Exception as e:
+                return False, "apply_view_color failed: " + repr(e)
+
+
+
+        # ---------------------------------------------------------------------
         # IFC setup
         # ---------------------------------------------------------------------
         model = ifcopenshell.file(schema="IFC4")
@@ -402,6 +481,18 @@ def export_ifc_from_matdata(
                 force_faceted_brep=True,
             )
             ifc_run("geometry.assign_representation", model, product=elem, representation=shape)
+
+            # viewer color (not material)
+            name_key = (elem.Name or "").strip()
+            rgb = resolve_view_color(name_key, COLOR_MAP, DEFAULT_VIEW_COLOR)
+            # ok, msg = apply_view_color(model, ifc_run, shape, rgb, transparency=0.0, style_cache=STYLE_CACHE)
+            ok, msg = apply_view_color(model, shape, rgb, style_cache=STYLE_CACHE)
+            if not ok:
+                log_add("[Color] " + msg + "\n")
+            else:
+                log_add(".")
+
+#-------------------------------------------------------------------------------------------------------------------
 
             uid = str(payload.get("unit_id", ""))
             props = get_props(payload)

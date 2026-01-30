@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Tuple, cast
 
+from ifc_class_map import resolve_ifc_class_hint, DEFAULT_IFC_CLASS
+
 # ---------------------------------------------------------------------
 # Shared type contracts (Scheme A: keep this file in the same folder)
 # ---------------------------------------------------------------------
@@ -116,23 +118,44 @@ def to_branch_dict_any(x: AnyInput) -> Tuple[BranchDict, List[PathStr]]:
 def get_branch(
     branch_dict: Mapping[PathStr, List[Any]],
     path: PathStr,
+    *,
+    allow_fallback: bool = False,
     fallback_path: PathStr = "{0}",
 ) -> List[Any]:
     """
-    Get branch items by path; broadcast fallback "{0}" if needed.
+    Get branch items by path.
 
-    Typical GH use-case this supports:
-    - Geo is a DataTree with many branches, but Category/UnitId is a single item.
-      In that case Category/UnitId should "broadcast" to every Geo branch.
+    Parameters
+    ----------
+    branch_dict : Mapping[PathStr, List[Any]]
+        GH-like branch dictionary, e.g. {"{0}": [...], "{1}": [...]}
 
-    Returns:
-    - a COPY of the branch list (safe against accidental in-place mutation)
-    - empty list if neither path exists
+    path : PathStr
+        Target branch path.
+
+    allow_fallback : bool
+        - False (default): STRICT mode
+            * Only return data if `path` exists.
+            * Missing path => []  (recommended for Geo / Obj / existence data)
+        - True: BROADCAST mode
+            * If `path` missing, try `fallback_path`.
+            * Used for label-like data (Category / UnitId / Role).
+
+    fallback_path : PathStr
+        Branch path used when broadcasting is enabled.
+        Default is "{0}", matching common GH patterns.
+
+    Returns
+    -------
+    List[Any]
+        A COPY of the branch list (safe against in-place mutation).
     """
     if path in branch_dict:
         return list(branch_dict[path])
-    if fallback_path in branch_dict:
+
+    if allow_fallback and fallback_path in branch_dict:
         return list(branch_dict[fallback_path])
+
     return []
 
 
@@ -174,21 +197,17 @@ def build_matdata(
     logs: List[str] = []
 
     for p in all_paths:
-        objs = list(ObjD.get(p, []))
-        us = get_branch(UidD, p)
+        objs = get_branch(ObjD, p, allow_fallback=False)
+        us = get_branch(UidD, p, allow_fallback=True)
         if not us:
             raise Exception(f"[{p}] UnitId is required (missing branch and no fallback {{0}}).")
         unit_id = str(us[0])
 
-        cs = get_branch(CatD, p)
+        cs = get_branch(CatD, p, allow_fallback=True)
         cat_value = default_category if not cs else str(cs[0])
         # Optional: derive a loose IFC class hint (aligns with DBML ifcClassHint)
         cat_lower = (cat_value or "").strip().lower()
-        ifc_class_hint = "IfcBuildingElementProxy"
-        if cat_lower == "vertical":
-            ifc_class_hint = "IfcMember"
-        elif cat_lower == "horizontal":
-            ifc_class_hint = "IfcBeam"
+        ifc_class_hint = resolve_ifc_class_hint(cat_value)
 
         branch_items: List[Any] = []
         payload_count = 0

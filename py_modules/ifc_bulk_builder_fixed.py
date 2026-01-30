@@ -1,5 +1,5 @@
 # ifc_bulk_builder.py
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Dict
 from Grasshopper import DataTree # type: ignore
 from Grasshopper.Kernel.Data import GH_Path # type: ignore
 
@@ -56,21 +56,40 @@ def build_bulk_matdata(
                         f"bulk_builder: invalid leaf at path {path}: {item}"
                     )
 
-                geo, name = item
+                geo, raw_name = item
+
+                # Keep your naming convention
+                if "_" in raw_name:
+                    part_no, source_guid = raw_name.rsplit("_", 1)
+                else:
+                    part_no, source_guid = raw_name, None
+
+
+                props: Dict[str, Any] = {
+                    "scope": "BULK",
+                    "kind": "Bulk",
+                    "element_code": part_no,
+                    "ifc_class_hint": "IfcBuildingElementProxy",
+                    "container_id": container_id,
+                    'part_no': part_no,
+                    'source_guid': source_guid,
+
+                    # keep same reserved bags as your old builder
+                    "dims": {"L": None, "W": None, "R": None},
+                    "material": {"name": None},
+                    "finish": {"type": None, "thickness_um": None},
+                    "color_code": None,
+                }
+
+
                 payload: Payload = {
                     "schema": int(SchemaVersion),
-                    # 注意：Bulk 沒有 unit 概念，但為了 payload 契約一致，仍給一個佔位值
+                    # warning：Bulk doesn't have unit concept, to make the form as same as payload contact, give it a stakeholder.
                     "unit_id": "__BULK__",
-                    "name": str(name),
+                    "name": part_no,
                     "category": cat,
                     "geo": geo,
-                    "props": {
-                        "scope": "BULK",
-                        "kind": "Bulk",
-                        "element_code": str(name),
-                        "ifc_class_hint": "IfcBuildingElementProxy",
-                        "container_id": container_id,
-                    },
+                    "props": props,
                 }
                 matdata.append(payload)
                 count += 1

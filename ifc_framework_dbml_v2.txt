@@ -1,0 +1,150 @@
+// ------------------------------------------------------------
+// Curtain-wall IFC-like framework DBML (multi-level assemblies)
+// - Spatial hierarchy: Project > Building > Storey
+// - Element hierarchy: Unit (final hoistable) > Sub-Assemblies > Parts/Bulk
+// - Multi-level composition via ElementRel (AGGREGATES)
+//
+// Key design points:
+// 1) Element.kind is control-logic classification (NOT an IFC native field)
+// 2) IFC hierarchy is represented by ElementRel(relType="AGGREGATES")
+// 3) childRole is parent-relative and MUST distinguish:
+//    - Unit -> Sub-assembly roles: SUB_FRAME, SUB_TRIM_PANEL, SUB_BULK_PACK
+//    - Assembly -> Part/Bulk roles: FRAME_MEMBER, TRIM_MEMBER, TRIM_FIXING, BULK_ITEM
+//    - Fallback: GENERIC
+// ------------------------------------------------------------
+
+Table Spatial {
+  id uuid [pk]
+  parentId uuid [ref: > Spatial.id] // hierarchy tree: Project > Building > Storey
+  kind varchar [not null]           // "Project" | "Building" | "Storey"
+  name varchar [not null]
+  code varchar                      // optional human code (e.g., "02N", "10F")
+  elevation float                   // storey elevation (unit as you define)
+}
+
+Table Element {
+  id uuid [pk]
+
+  // Where this element belongs spatially (usually Storey)
+  spatialId uuid [ref: > Spatial.id]
+
+  // Human-readable unique code within a storey
+  // Examples:
+  //  - Unit final: "Unit_02N_001_Final"
+  //  - Sub-assembly: "Unit_02N_001_Frame", "TrimPanel_A01"
+  //  - Part: "Mullion_V_001", "Transom_H_001"
+  //  - Bulk: "ScrewPack_01"
+  code varchar [not null]
+
+  // Internal classification to drive exporter logic
+  // "Unit"       : final hoistable / shippable unit
+  // "Assembly"   : sub-assembly module (frame, trim panel, etc.)
+  // "Part"       : a physical component (extrusions, brackets, etc.)
+  // "Bulk"       : loose/site-installed/non-geometric set (fasteners, etc.)
+  kind varchar [not null]           // "Unit" | "Assembly" | "Part" | "Bulk"
+
+  // Optional hint for IFC export class selection
+  // Examples: "IfcElementAssembly" | "IfcMember" | "IfcBeam" | "IfcBuildingElementProxy"
+  ifcClassHint varchar
+
+  // Optional: store/export stable GUID mappings
+  ifcGlobalId varchar
+
+  createdAt timestamp
+  updatedAt timestamp
+
+  Indexes {
+    (spatialId, code) [unique]
+  }
+}
+
+// ------------------------------------------------------------
+// Multi-level composition tree (represents IfcRelAggregates in IFC)
+//
+// Examples:
+//  Unit_Final --AGGREGATES--> Unit_Frame         (childRole="SUB_FRAME")
+//  Unit_Final --AGGREGATES--> TrimPanel_A01      (childRole="SUB_TRIM_PANEL")
+//  Unit_Frame --AGGREGATES--> Mullion_V_001      (childRole="FRAME_MEMBER")
+//  TrimPanel  --AGGREGATES--> Trim_H_01          (childRole="TRIM_MEMBER")
+//  TrimPanel  --AGGREGATES--> Trim_Fix_01        (childRole="TRIM_FIXING")
+//  Unit_Final --AGGREGATES--> ScrewPack_01       (childRole="SUB_BULK_PACK" or "BULK_ITEM")
+//
+// NOTE on childRole:
+// - parent-relative
+// - DO NOT reuse a vague value like "FRAME" for both assembly-level and part-level.
+// ------------------------------------------------------------
+Table ElementRel {
+  id uuid [pk]
+
+  parentElementId uuid [not null, ref: > Element.id]
+  relType varchar [not null]        // ONLY use: "AGGREGATES"
+  childElementId uuid [not null, ref: > Element.id]
+
+  // Optional role label for quick queries/visualization (parent-relative).
+  // Recommended enum set:
+  //   Unit -> Sub-assemblies / packs:
+  //     "SUB_FRAME" | "SUB_TRIM_PANEL" | "SUB_BULK_PACK"
+  //   Assembly -> Components:
+  //     "FRAME_MEMBER" | "TRIM_MEMBER" | "TRIM_FIXING" | "BULK_ITEM"
+  //   Fallback:
+  //     "GENERIC"
+  childRole varchar
+
+  Indexes {
+    (parentElementId, relType, childElementId) [unique]
+  }
+}
+
+// --------------------
+// Fixed Psets (1:1)
+// --------------------
+
+// 1) Unit Pset (final hoistable unit)
+Table Pset_Unit {
+  elementId uuid [pk, ref: > Element.id] // element.kind should be "Unit"
+
+  UnitCode varchar [not null]            // e.g. "02N_001"
+  BayNo varchar                          // e.g. "02N"
+  Level varchar                          // e.g. "10F"
+  InstallSequence int                    // installation order
+  UnitWidth float                        // unit width (your unit, e.g. mm)
+  UnitHeight float                       // unit height
+  InstallType varchar                    // "Prefabricated" | "Semi" | "OnSite"
+}
+
+// 2) Part Pset
+Table Pset_Part {
+  elementId uuid [pk, ref: > Element.id] // element.kind should be "Part"
+
+  PartCode varchar [not null]            // internal part no.
+  PartType varchar                       // "Vertical" | "Horizontal" | "Bracket"
+  ProfileCode varchar                    // extrusion profile code
+  Material varchar                       // "AL6063" | "SS304" ...
+  Finish varchar                         // "Anodized" | "Powder" ...
+  Length float                           // cut length (your unit, e.g. mm)
+}
+
+// 3) Bulk Pset
+Table Pset_Bulk {
+  elementId uuid [pk, ref: > Element.id] // element.kind should be "Bulk"
+
+  InstallLocation varchar                // location description
+  Quantity int [not null]                // quantity
+  FixingMethod varchar                   // "Screw" | "Weld" ...
+  OnSiteCutRequired boolean              // true/false
+}
+
+// --------------------
+// Optional (recommended) Assembly Pset (minimal)
+// --------------------
+// Why this exists:
+// - In multi-level assembly, sub-assemblies (Frame, TrimPanel) often need their own metadata.
+// - If you truly want ONLY Unit/Part/Bulk Psets, you may delete this table.
+// - But keeping it avoids stuffing assembly metadata into the wrong Pset.
+Table Pset_Assembly {
+  elementId uuid [pk, ref: > Element.id] // element.kind should be "Assembly"
+
+  AssemblyCode varchar [not null]        // e.g. "Unit_Frame", "TrimPanel_A01"
+  AssemblyType varchar                   // "FRAME" | "TRIM_PANEL" | "GENERIC"
+  InstallType varchar                    // "Prefabricated" | "Semi" | "OnSite"
+}
