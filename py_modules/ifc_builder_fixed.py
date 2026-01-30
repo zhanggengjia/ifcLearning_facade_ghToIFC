@@ -1,167 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-ifc_builder.py
+ifc_builder.py  (patched to align with your existing utils/*)
 
-Build a Grasshopper-friendly "MatData" payload from flexible inputs
-(GH DataTree / list / scalar), and normalize it into a predictable structure.
+This builder is intentionally conservative:
+- Does NOT change your GH-facing inputs/outputs.
+- Keeps your naming convention: raw_name = "[PartNo]_[GUID]" or "[PartNo]".
+- Keeps the same reserved bags in props (dims/material/finish/color_code).
+- Uses your existing utils (gh_utils + payload_utils) WITHOUT modifying them.
 
-Output shape:
-- MatData = List[List[wrapped_payload]]
-  - outer list  : branches (sorted by path string)
-  - inner list  : items in that branch
-  - leaf item   : payload dict (wrapped into GH_ObjectWrapper if available)
+GH Inputs (typical):
+  Obj(Tree)      : leaf = GH_ObjectWrapper([geo, raw_name])
+  Category(Tree) : item/branch = str (or empty -> default_category)
+  UnitId(Tree)   : item/branch = str (required)
 
-This file is designed to pair with an exporter:
-- Builder: converts GH inputs -> normalized payloads
-- Exporter: consumes payloads -> IFC entities
+Outputs:
+  MatData : List[List[GH_ObjectWrapper(payload_dict)]]
+  Log     : str
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Tuple, cast
+from typing import Any, Dict, List, Tuple
 
-from ifc_class_map import resolve_ifc_class_hint, DEFAULT_IFC_CLASS
+from ifc_class_map import resolve_ifc_class_hint
 
-# ---------------------------------------------------------------------
-# Shared type contracts (Scheme A: keep this file in the same folder)
-# ---------------------------------------------------------------------
-from ifc_types import AnyInput, BranchDict, GHDataTreeLike, PathStr, Payload
+from ifc_types import AnyInput, Payload, PathStr
 
-# -----------------------------------------------------------------------------
-# Optional GH wrapper (safe import)
-# -----------------------------------------------------------------------------
-# Grasshopper wires sometimes behave better when dict payloads are wrapped.
-# We attempt to import GH_ObjectWrapper. If running outside GH (tests/CI),
-# the import fails, and we simply skip wrapping.
-try:
-    from Grasshopper.Kernel.Types import GH_ObjectWrapper  # type: ignore
-except Exception:
-    GH_ObjectWrapper = None  # type: ignore
+from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh
+from utils.payload_utils import normalize_payload_inplace
 
 
-def _wrap_payload(payload: Payload) -> Any:
-    """
-    Wrap payload for Grasshopper wire transport.
-
-    Why wrap?
-    - Some GH contexts don't like plain Python dicts on the wire.
-    - GH_ObjectWrapper forces GH to treat it as a single "goo" item.
-
-    Behavior:
-    - In GH runtime: GH_ObjectWrapper exists -> wrap dict
-    - Outside GH: return dict directly (useful for tests/scripts)
-    """
-    if GH_ObjectWrapper is None:
-        return payload
-    return GH_ObjectWrapper(payload)
-
-
-# -----------------------------------------------------------------------------
-# Core utilities
-# -----------------------------------------------------------------------------
-def is_tree_like(x: Any) -> bool:
-    """
-    Return True if `x` looks like a Grasshopper DataTree (duck-typed).
-
-    We intentionally avoid checking exact .NET types and only verify required API.
-    """
-    return (
-        x is not None
-        and hasattr(x, "BranchCount")
-        and hasattr(x, "Path")
-        and hasattr(x, "Branch")
-    )
-
-
-def to_branch_dict_any(x: AnyInput) -> Tuple[BranchDict, List[PathStr]]:
-    """
-    Normalize an input into a (branch_dict, paths) pair.
-
-    Supported inputs:
-    1) GH DataTree-like
-       - each tree path becomes a dict key (string)
-       - each branch becomes a Python list
-       - returns all discovered paths (sorted)
-
-    2) list/tuple (Sequence)
-       - treated as a single branch "{0}"
-       - returns one path ["{0}"]
-
-    3) scalar
-       - treated as a single branch "{0}" containing that one item
-       - returns one path ["{0}"]
-    """
-    branches: BranchDict = {}
-    paths: List[PathStr] = []
-
-    # Case 1: Grasshopper DataTree
-    if is_tree_like(x):
-        tree = cast(GHDataTreeLike, x)
-        for i in range(int(tree.BranchCount)):
-            path_obj = tree.Path(i)
-            p = str(path_obj)  # normalize to stable string key, e.g. "{0;1}"
-            branches[p] = list(tree.Branch(path_obj))
-            paths.append(p)
-        paths.sort()
-        return branches, paths
-
-    # Case 2: Python sequence -> one branch
-    if isinstance(x, (list, tuple)):
-        branches["{0}"] = list(x)
-        return branches, ["{0}"]
-
-    # Case 3: scalar -> one branch with one item
-    branches["{0}"] = [x]
-    return branches, ["{0}"]
-
-
-def get_branch(
-    branch_dict: Mapping[PathStr, List[Any]],
-    path: PathStr,
-    *,
-    allow_fallback: bool = False,
-    fallback_path: PathStr = "{0}",
-) -> List[Any]:
-    """
-    Get branch items by path.
-
-    Parameters
-    ----------
-    branch_dict : Mapping[PathStr, List[Any]]
-        GH-like branch dictionary, e.g. {"{0}": [...], "{1}": [...]}
-
-    path : PathStr
-        Target branch path.
-
-    allow_fallback : bool
-        - False (default): STRICT mode
-            * Only return data if `path` exists.
-            * Missing path => []  (recommended for Geo / Obj / existence data)
-        - True: BROADCAST mode
-            * If `path` missing, try `fallback_path`.
-            * Used for label-like data (Category / UnitId / Role).
-
-    fallback_path : PathStr
-        Branch path used when broadcasting is enabled.
-        Default is "{0}", matching common GH patterns.
-
-    Returns
-    -------
-    List[Any]
-        A COPY of the branch list (safe against in-place mutation).
-    """
-    if path in branch_dict:
-        return list(branch_dict[path])
-
-    if allow_fallback and fallback_path in branch_dict:
-        return list(branch_dict[fallback_path])
-
-    return []
-
-
-# -----------------------------------------------------------------------------
-# MatData builder
-# -----------------------------------------------------------------------------
 def build_matdata(
     Obj: AnyInput,
     Category: AnyInput,
@@ -170,57 +38,49 @@ def build_matdata(
     default_category: str = "Unspecified",
 ) -> Tuple[List[List[Any]], str]:
     """
-    Obj(Tree) builder (解法A):
-      leaf = GH_ObjectWrapper([geo, raw_name])
-    where raw_name = "[PartNo]_[GUID]" or "[PartNo]"
-
-    Output MatData keeps the same shape as before:
-      List[branch] where each branch is List[GH_ObjectWrapper(payload_dict)]
+    Build MatData payloads for UNIT scope.
+    This function keeps your original MatData shape (branches preserved).
     """
-
     ObjD, ObjP = to_branch_dict_any(Obj)
     CatD, CatP = to_branch_dict_any(Category)
     UidD, UidP = to_branch_dict_any(UnitId)
+
     all_paths: List[PathStr] = sorted(set(ObjP) | set(UidP) | set(CatP))
-
-    try:
-        from Grasshopper.Kernel.Types import GH_ObjectWrapper  # type: ignore
-    except Exception:
-        GH_ObjectWrapper = None  # type: ignore
-
-    def _unwrap(x: Any) -> Any:
-        if GH_ObjectWrapper is not None and isinstance(x, GH_ObjectWrapper):  # type: ignore
-            return getattr(x, "Value", x)
-        return x
-
     out: List[List[Any]] = []
     logs: List[str] = []
 
     for p in all_paths:
         objs = get_branch(ObjD, p, allow_fallback=False)
-        us = get_branch(UidD, p, allow_fallback=True)
-        if not us:
+        u_branch = get_branch(UidD, p, allow_fallback=True)
+        if not u_branch:
             raise Exception(f"[{p}] UnitId is required (missing branch and no fallback {{0}}).")
-        unit_id = str(us[0])
 
-        cs = get_branch(CatD, p, allow_fallback=True)
-        cat_value = default_category if not cs else str(cs[0])
-        # Optional: derive a loose IFC class hint (aligns with DBML ifcClassHint)
-        cat_lower = (cat_value or "").strip().lower()
+        unit_id = str(unwrap_gh(u_branch[0]) or "").strip()
+        if not unit_id:
+            raise Exception(f"[{p}] UnitId is empty after unwrap/strip.")
+
+        c_branch = get_branch(CatD, p, allow_fallback=True)
+        cat_value = default_category if not c_branch else str(unwrap_gh(c_branch[0]) or "").strip()
+        if not cat_value:
+            cat_value = default_category
+
+        # Optional: derive loose IFC class hint (aligns with DBML ifcClassHint)
         ifc_class_hint = resolve_ifc_class_hint(cat_value)
 
         branch_items: List[Any] = []
         payload_count = 0
+        bad_leaf = 0
 
         for k, obj_item in enumerate(objs):
-            pair = _unwrap(obj_item)
+            pair = unwrap_gh(obj_item)
 
             # Expect [geo, raw_name]
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
-                raise Exception(f"[{p}] Obj leaf[{k}] must be [geo, raw_name]. Got: {type(pair)}")
+                bad_leaf += 1
+                continue
 
             geo = pair[0]
-            raw_name = str(pair[1])
+            raw_name = str(unwrap_gh(pair[1]) or "")
 
             # Keep your naming convention
             if "_" in raw_name:
@@ -228,36 +88,53 @@ def build_matdata(
             else:
                 part_no, source_guid = raw_name, None
 
+            part_no = str(part_no).strip()
+            if not part_no:
+                bad_leaf += 1
+                continue
+
             props: Dict[str, Any] = {
                 "kind": "Part",
                 "element_code": part_no,
                 "ifc_class_hint": ifc_class_hint,
 
                 "part_no": part_no,
-                "source_guid": source_guid,
+                "source_guid": str(source_guid).strip() if source_guid is not None else None,
 
                 # keep same reserved bags as your old builder
                 "dims": {"L": None, "W": None, "R": None},
                 "material": {"name": None},
                 "finish": {"type": None, "thickness_um": None},
                 "color_code": None,
+
+                # keep a redundant copy for compatibility with other parts of your pipeline
+                "unit_id": unit_id,
+                "scope": "UNIT",
             }
 
             payload: Payload = {
                 "schema": int(schema_version),
                 "unit_id": unit_id,
-                "geo": geo,            # <-- guaranteed single geometry now
+                "geo": geo,            # single geometry
                 "name": part_no,
                 "category": cat_value,
                 "props": props,
             }
 
-            branch_items.append(_wrap_payload(payload))
+            normalize_payload_inplace(
+                payload,
+                default_schema=int(schema_version),
+                default_category=cat_value,
+            )
+
+            branch_items.append(wrap_gh(payload))
             payload_count += 1
 
         out.append(branch_items)
-        logs.append(f"{p} -> Unit {unit_id}: payloads={payload_count} | Cat={cat_value}")
+        logs.append(
+            f"{p} -> Unit {unit_id}: payloads={payload_count}"
+            + (f" | bad_leaf={bad_leaf}" if bad_leaf else "")
+            + f" | Cat={cat_value}"
+        )
 
     return out, "\n".join(logs)
-
-

@@ -1,3 +1,4 @@
+# ifc_assembly.py
 # -*- coding: utf-8 -*-
 """
 ifc_assembly.py (AUTO WRAP + Payload runtime check, NO TypeGuard)
@@ -13,49 +14,19 @@ Typing:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Optional, cast
-from ifc_types import Payload  # TypedDict contract
+from typing import Any, Dict, List, Optional, Tuple, cast
 
-try:
-    from Grasshopper.Kernel.Types import GH_ObjectWrapper  # type: ignore
-except Exception:
-    GH_ObjectWrapper = None  # type: ignore
+from ifc_types import Payload
+from utils.gh_utils import unwrap_gh, wrap_gh, is_datatree_like
 
-
-# ------------------------------------------------------------------------------
-# GH helpers
-# ------------------------------------------------------------------------------
-
-def _unwrap(x: Any) -> Any:
-    if GH_ObjectWrapper is not None and isinstance(x, GH_ObjectWrapper):  # type: ignore
-        return getattr(x, "Value", x)
-    return x
-
-
-def _wrap(x: Any) -> Any:
-    if GH_ObjectWrapper is not None and isinstance(x, dict):  # type: ignore
-        return GH_ObjectWrapper(x)
-    return x
-
-
-def _is_datatree_like(x: Any) -> bool:
-    return hasattr(x, "BranchCount") and hasattr(x, "Branch")
-
-
-# ------------------------------------------------------------------------------
-# Payload runtime validation (no TypeGuard)
-# ------------------------------------------------------------------------------
 
 def is_payload(x: Any) -> bool:
     """
-    Runtime shape check for ifc_types.Payload.
-
-    We can't do isinstance(x, Payload) because Payload is TypedDict (typing-only).
+    Runtime shape check for ifc_types.Payload (TypedDict cannot be isinstance).
     """
     if not isinstance(x, dict):
         return False
 
-    # Must have these stable core keys (per ifc_types.Payload) :contentReference[oaicite:3]{index=3}
     if not isinstance(x.get("unit_id", None), str):
         return False
     if not isinstance(x.get("name", None), str):
@@ -63,12 +34,10 @@ def is_payload(x: Any) -> bool:
     if "geo" not in x:
         return False
 
-    # props can be missing (we'll normalize), but if present must be dict
     props = x.get("props", None)
     if props is not None and not isinstance(props, dict):
         return False
 
-    # optional sanity checks (permissive)
     sch = x.get("schema", None)
     if sch is not None and not isinstance(sch, int):
         return False
@@ -80,46 +49,29 @@ def is_payload(x: Any) -> bool:
     return True
 
 
-def _normalize_payload_inplace(p: Dict[str, Any]) -> None:
-    if "props" not in p or p["props"] is None or not isinstance(p["props"], dict):
-        p["props"] = {}
-    if "schema" not in p or p["schema"] is None or not isinstance(p["schema"], int):
-        p["schema"] = 1
-    if "category" not in p or p["category"] is None or not isinstance(p["category"], str):
-        p["category"] = "Unspecified"
-
-
-# ------------------------------------------------------------------------------
-# Assembly helpers
-# ------------------------------------------------------------------------------
-
-def _ensure_props(payload: Dict[str, Any]) -> Dict[str, Any]:
-    props = payload.get("props")
+def _ensure_props(p: Dict[str, Any]) -> Dict[str, Any]:
+    props = p.get("props")
     if not isinstance(props, dict):
         props = {}
-        payload["props"] = props
+        p["props"] = props
     return props
 
 
-def _build_key(sub_name: str, key_suffix: Optional[str]) -> str:
-    base = sub_name.strip()
-    if not base:
-        return ""
-    if key_suffix:
-        suf = str(key_suffix).strip()
-        if suf:
-            return f"{base}|{suf}"
-    return base
+def _build_key(name: str, key_suffix: Optional[str]) -> str:
+    n = str(name or "").strip()
+    s = str(key_suffix or "").strip() if key_suffix else ""
+    if not s:
+        return n
+    return f"{n}|{s}"
 
 
-def _same_key(a: dict, b: dict) -> bool:
-    return str(a.get("key", "")).strip() == str(b.get("key", "")).strip()
+def _same_key(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    return str(a.get("key", "")) == str(b.get("key", ""))
+
 
 def _stable_wrap_outer(path: list, node: dict) -> list:
     """
     Make `node` the OUTERMOST level, stably.
-
-    Rules:
     - If node already exists anywhere in path -> remove it (dedupe)
     - Insert node at the front
     - Collapse consecutive duplicates (trim, trim)
@@ -127,17 +79,14 @@ def _stable_wrap_outer(path: list, node: dict) -> list:
     if not isinstance(path, list):
         path = []
 
-    # 1) remove existing occurrences of same key
     cleaned = []
     for lvl in path:
         if isinstance(lvl, dict) and _same_key(lvl, node):
             continue
         cleaned.append(lvl)
 
-    # 2) insert as outermost
     out = [node] + cleaned
 
-    # 3) collapse consecutive duplicates by key
     collapsed = []
     for lvl in out:
         if not collapsed:
@@ -151,19 +100,17 @@ def _stable_wrap_outer(path: list, node: dict) -> list:
     return collapsed
 
 
-
 def _annotate_payload(payload: Payload, sub_name: str, key_suffix: Optional[str], role: Optional[str]) -> Payload:
     p: Dict[str, Any] = dict(payload)  # defensive copy
-    _normalize_payload_inplace(p)
+    _ensure_props(p)
 
-    props = _ensure_props(p)
-
+    props = cast(Dict[str, Any], p["props"])
     path = props.get("assembly_path")
     if not isinstance(path, list):
         path = []
         props["assembly_path"] = path
 
-    node = {
+    node: Dict[str, Any] = {
         "name": sub_name,
         "key": _build_key(sub_name, key_suffix) or sub_name,
     }
@@ -174,39 +121,44 @@ def _annotate_payload(payload: Payload, sub_name: str, key_suffix: Optional[str]
     return cast(Payload, p)
 
 
-# ------------------------------------------------------------------------------
-# Walk MatData and annotate only valid Payload leaves
-# ------------------------------------------------------------------------------
-
-def _walk(obj: Any, sub_name: str, key_suffix: Optional[str], role: Optional[str]) -> Any:
+def walk(obj: Any, sub_name: str, key_suffix: Optional[str], role: Optional[str]) -> Any:
+    """
+    Walk MatData and annotate only valid Payload leaves.
+    Preserves container shapes:
+      - DataTree-like => List[List[...]]
+      - list => list
+      - tuple => tuple
+      - scalar => scalar
+    """
     if obj is None:
         return None
 
-    if _is_datatree_like(obj):
+    if is_datatree_like(obj):
         out: List[List[Any]] = []
-        for i in range(int(obj.BranchCount)):
+        try:
+            bc = int(getattr(obj, "BranchCount"))
+        except Exception:
+            bc = 0
+
+        for i in range(bc):
             br = obj.Branch(i)
-            out.append([_walk(it, sub_name, key_suffix, role) for it in br])
+            out.append([walk(it, sub_name, key_suffix, role) for it in br])
         return out
 
     if isinstance(obj, list):
-        return [_walk(it, sub_name, key_suffix, role) for it in obj]
+        return [walk(it, sub_name, key_suffix, role) for it in obj]
     if isinstance(obj, tuple):
-        return tuple(_walk(it, sub_name, key_suffix, role) for it in obj)
+        return tuple(walk(it, sub_name, key_suffix, role) for it in obj)
 
-    leaf = _unwrap(obj)
+    leaf = unwrap_gh(obj)
 
     if is_payload(leaf):
         pl = cast(Payload, leaf)
         annotated = _annotate_payload(pl, sub_name, key_suffix, role)
-        return _wrap(annotated)
+        return wrap_gh(annotated)
 
     return obj
 
-
-# ------------------------------------------------------------------------------
-# GH entry
-# ------------------------------------------------------------------------------
 
 def annotate_subassembly(MatData: Any, Name: Any, KeySuffix: Any = None, Role: Any = None) -> Tuple[Any, str]:
     sub_name = str(Name).strip() if Name is not None else ""
@@ -223,8 +175,7 @@ def annotate_subassembly(MatData: Any, Name: Any, KeySuffix: Any = None, Role: A
         r = str(Role).strip()
         role = r if r else None
 
-    new_matdata = _walk(MatData, sub_name, key_suffix, role)
-
+    new_matdata = walk(MatData, sub_name, key_suffix, role)
     return new_matdata, (
         "assembly(auto): applied. "
         "Rule: wrap outer (prepend) stably. Optional role is stored per assembly node. "

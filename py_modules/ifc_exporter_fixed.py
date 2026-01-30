@@ -2,50 +2,40 @@
 """
 ifc_exporter.py
 
-Purpose
--------
-Export an IFC file from a Grasshopper-friendly "MatData" payload.
+This version keeps your existing utils untouched and only refactors exporter
+to use the new additive helper module: utils/exporter_utils.py
 
-Design principles
------------------
-1) Stable GH calling signature (DO NOT CHANGE):
-   - export_ifc_from_matdata(Run, MatData, StoreyName, StoreyElev, OutPath)
-
-2) Payload contract (ifc_types.Payload):
-   Required keys:
-     schema   : int
-     unit_id  : str-like
-     name     : str-like
-     geo      : Rhino geometry
-     category : str-like (if missing -> "Unspecified")
-     props    : dict
-
-3) Container strategy (UPDATED: UNIT + BULK):
-   - Each payload belongs to a "container" determined by:
-       scope = payload["props"].get("scope", "UNIT")
-       if scope == "BULK":
-           container_id = payload["props"].get("container_id", "DEFAULT")
-           container assembly name: Bulk_{container_id}
-       else:
-           unit_id = payload["unit_id"]
-           container assembly name: Unit_{unit_id}
-   - Container assemblies are placed under the Storey.
-
-4) Multi-level assembly strategy (UPDATED: supports multi-level):
-   - Sub-assemblies are read from:
-       payload["props"]["assembly_path"] = [{"name": "...", "key": "..."}, ...]
-     appended by ifc_assembly.py (AUTO WRAP / multi-level).
-   - Elements are assigned to the deepest assembly node if assembly_path exists;
-     otherwise assigned directly to the container.
+Key compatibility:
+- payload["unit_id"] OR payload["props"]["unit_id"]
+- props["assembly_path"] supports list[dict] and list[str] ("name|role") formats
+- legacy props["assembly"] is supported
 """
 
 from __future__ import annotations
 
 import os
 import traceback
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ifc_types import Payload
+
+from ifc_color_csv import load_color_map_csv_with_diag, resolve_view_color
+
+from utils.path_utils import normalize_outpath
+from utils.gh_utils import tname
+from utils.viewColor_utils import apply_view_color
+from utils.payload_utils import ensure_props
+
+from utils.exporter_utils import (
+    collect_payloads,
+    group_by_container,
+    get_scope,
+    get_container_id,
+    container_display_name,
+    parse_assembly_path,
+    ensure_assembly_chain,
+)
+
 
 # ---------------------------------------------------------------------
 # Public API (DO NOT CHANGE signature)
@@ -69,8 +59,6 @@ def export_ifc_from_matdata(
         import ifcopenshell  # type: ignore
         from ifcopenshell.api import run as ifc_run  # type: ignore
 
-        from ifc_color_csv import load_color_map_csv_with_diag, resolve_view_color
-
         import Grasshopper as gh
         gh_path = gh.Instances.ActiveCanvas.Document.FilePath
         proj_dir = os.path.dirname(gh_path) if gh_path else os.getcwd()
@@ -83,312 +71,17 @@ def export_ifc_from_matdata(
         Log += f"[Color] entries = {len(COLOR_MAP)}\n"
 
         DEFAULT_VIEW_COLOR = (0.75, 0.75, 0.75)
-        STYLE_CACHE = {}
-
-        # ---------------------------------------------------------------------
-        # Debug helpers
-        # ---------------------------------------------------------------------
-        def tname(x: Any) -> str:
-            try:
-                return x.GetType().FullName  # type: ignore[attr-defined]
-            except Exception:
-                try:
-                    return str(type(x))
-                except Exception:
-                    return "<unknown-type>"
+        STYLE_CACHE: Dict[Any, Any] = {}
 
         def log_add(s: str) -> None:
             nonlocal Log
             Log += s
 
         # ---------------------------------------------------------------------
-        # OutPath normalization
+        # OutPath normalization (uses your existing utils.path_utils.normalize_outpath)
         # ---------------------------------------------------------------------
-        def normalize_outpath(out_path: Any, storey_name: str) -> str:
-            p = str(out_path).strip().strip('"')
-            if p == "":
-                p = "."
-            ext = os.path.splitext(p)[1]
-
-            if os.path.isdir(p) or ext == "":
-                out_dir = p
-                if not os.path.exists(out_dir):
-                    os.makedirs(out_dir, exist_ok=True)
-                return os.path.join(out_dir, f"{storey_name}_multi_units.ifc")
-
-            out_dir = os.path.dirname(p)
-            if out_dir and not os.path.exists(out_dir):
-                os.makedirs(out_dir, exist_ok=True)
-
-            root, ext2 = os.path.splitext(p)
-            return (root + ".ifc") if ext2.lower() != ".ifc" else p
-
-        ResolvedOutPath: str = normalize_outpath(OutPath, str(StoreyName))
-
-        # ---------------------------------------------------------------------
-        # GH goo / payload helpers
-        # ---------------------------------------------------------------------
-        try:
-            from Grasshopper.Kernel.Types import GH_ObjectWrapper  # type: ignore
-        except Exception:
-            GH_ObjectWrapper = None  # type: ignore
-
-        def is_datatree_like(x: Any) -> bool:
-            return x is not None and hasattr(x, "BranchCount") and hasattr(x, "Branch")
-
-        def unwrap_payload(x: Any) -> Payload:
-            if GH_ObjectWrapper is not None and isinstance(x, GH_ObjectWrapper):  # type: ignore
-                x = getattr(x, "Value", x)
-
-            if not isinstance(x, dict):
-                raise TypeError(f"MatData item is not dict/goo(dict). Got {tname(x)}")
-
-            if "unit_id" not in x:
-                raise KeyError("Payload missing required key: 'unit_id'")
-            if "name" not in x:
-                raise KeyError("Payload missing required key: 'name'")
-            if "geo" not in x:
-                raise KeyError("Payload missing required key: 'geo'")
-
-            if "category" not in x or x["category"] is None:
-                x["category"] = "Unspecified"
-
-            if "props" not in x or x["props"] is None:
-                x["props"] = {}
-
-            if "schema" not in x or x["schema"] is None:
-                x["schema"] = 1
-
-            return x  # type: ignore[return-value]
-
-        def iter_payloads(obj: Any) -> Iterator[Payload]:
-            if obj is None:
-                return
-
-            if is_datatree_like(obj):
-                for i in range(int(obj.BranchCount)):
-                    br = obj.Branch(i)
-                    for it in br:
-                        for p in iter_payloads(it):
-                            yield p
-                return
-
-            if isinstance(obj, (list, tuple)):
-                for it in obj:
-                    for p in iter_payloads(it):
-                        yield p
-                return
-
-            yield unwrap_payload(obj)
-
-        # ---------------------------------------------------------------------
-        # props helpers
-        # ---------------------------------------------------------------------
-        def get_props(pl: Payload) -> Dict[str, Any]:
-            props = pl.get("props")  # type: ignore[arg-type]
-            return props if isinstance(props, dict) else {}
-
-        def get_val(pl: Payload, key: str, default: Any = None) -> Any:
-            if key in pl:
-                return pl.get(key, default)  # type: ignore[arg-type]
-            props = get_props(pl)
-            return props.get(key, default)
-
-        def get_dict(pl: Payload, key: str) -> Dict[str, Any]:
-            v = get_val(pl, key, {})
-            return v if isinstance(v, dict) else {}
-
-        # ---------------------------------------------------------------------
-        # Container (UNIT/BULK) helpers (NEW)
-        # ---------------------------------------------------------------------
-        def get_scope(pl: Payload) -> str:
-            scope = get_props(pl).get("scope", "UNIT")
-            s = str(scope).strip().upper() if scope is not None else "UNIT"
-            return "BULK" if s == "BULK" else "UNIT"
-
-        def get_container_id(pl: Payload) -> str:
-            scope = get_scope(pl)
-            if scope == "BULK":
-                cid = get_props(pl).get("container_id", "DEFAULT")
-                c = str(cid).strip() if cid is not None else "DEFAULT"
-                return c if c else "DEFAULT"
-            # UNIT
-            uid = pl.get("unit_id", None)
-            if uid is None or str(uid).strip() == "":
-                raise ValueError("UNIT payload missing 'unit_id'.")
-            return str(uid)
-
-        def container_display_name(scope: str, cid: str) -> str:
-            return f"Bulk_{cid}" if scope == "BULK" else f"Unit_{cid}"
-
-        # ---------------------------------------------------------------------
-        # Multi-level Assembly annotation reader
-        # ---------------------------------------------------------------------
-        def get_assembly_path(pl: Payload) -> List[Dict[str, str]]:
-            """
-            Preferred:
-              props["assembly_path"] = [{"name": "...", "key": "..."}, ...]
-            Legacy (single level):
-              props["assembly"] = {"sub_name": "...", "sub_key": "..."}
-            Returns:
-              normalized list of {"name": str, "key": str}
-            """
-            props = get_props(pl)
-
-            ap = props.get("assembly_path")
-            out: List[Dict[str, str]] = []
-
-            if isinstance(ap, list):
-                for level in ap:
-                    if not isinstance(level, dict):
-                        continue
-                    nm = str(level.get("name", "")).strip()
-                    ky = str(level.get("key", "")).strip()
-                    if ky == "" and nm == "":
-                        continue
-                    if ky == "":
-                        ky = nm
-                    if nm == "":
-                        nm = ky
-                    lvl_out = {"name": nm, "key": ky}
-                    rl = level.get("role")
-                    if rl is not None:
-                        rr = str(rl).strip()
-                        if rr:
-                            lvl_out["role"] = rr
-                    out.append(lvl_out)
-                return out
-
-            # backward compatible: single-level tag
-            asm = props.get("assembly")
-            if isinstance(asm, dict):
-                sub_key = str(asm.get("sub_key", "")).strip()
-                sub_name = str(asm.get("sub_name", "")).strip()
-                if sub_key != "":
-                    if sub_name == "":
-                        sub_name = sub_key
-                    return [{"name": sub_name, "key": sub_key}]
-
-            return []
-
-        # ---------------------------------------------------------------------
-        # Geometry helpers
-        # ---------------------------------------------------------------------
-        def brep_to_mesh(brep: "rg.Brep") -> Optional["rg.Mesh"]:
-            mp = rg.MeshingParameters.FastRenderMesh
-            meshes = rg.Mesh.CreateFromBrep(brep, mp)
-            if not meshes:
-                return None
-
-            m = rg.Mesh()
-            for part in meshes:
-                if part:
-                    m.Append(part)
-
-            m.Normals.ComputeNormals()
-            m.Compact()
-            return m
-
-        def geom_to_mesh(geo: Any) -> Optional["rg.Mesh"]:
-            if geo is None:
-                return None
-
-            if isinstance(geo, rg.Mesh):
-                m = geo.DuplicateMesh()
-                m.Normals.ComputeNormals()
-                m.Compact()
-                return m
-
-            if isinstance(geo, rg.Brep):
-                return brep_to_mesh(geo)
-
-            if isinstance(geo, rg.Extrusion):
-                return brep_to_mesh(geo.ToBrep(True))
-
-            if isinstance(geo, rg.Surface):
-                brep = geo.ToBrep()
-                return brep_to_mesh(brep)
-
-            brep = rg.Brep.TryConvertBrep(geo)
-            if brep:
-                return brep_to_mesh(brep)
-
-            return None
-
-        def mesh_to_vertices_faces(
-            mesh: "rg.Mesh",
-        ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[int, int, int]]]:
-            if mesh is None or mesh.Vertices.Count == 0:
-                return [], []
-
-            m = mesh.DuplicateMesh()
-            m.Faces.ConvertQuadsToTriangles()
-            m.Normals.ComputeNormals()
-            m.Compact()
-
-            verts = [(float(v.X), float(v.Y), float(v.Z)) for v in m.Vertices]
-            faces = [(int(f.A), int(f.B), int(f.C)) for f in m.Faces]
-            return verts, faces
-
-        # ---------------------------------------------------------------------
-        # Viewer Color setup
-        # ---------------------------------------------------------------------
-
-        def apply_view_color(model, shape_rep, rgb, style_cache=None):
-            """
-            IFC4 viewer color (BIMVision-friendly for Brep):
-            - Changed to use IfcSurfaceStyleShading instead of Rendering for max compatibility.
-            - Attach IfcStyledItem to:
-                1) representation item itself
-                2) if item is IfcFacetedBrep: ALSO attach to its Outer shell (IfcClosedShell)
-            """
-            try:
-                r, g, b = float(rgb[0]), float(rgb[1]), float(rgb[2])
-            except Exception:
-                return False, "invalid rgb"
-
-            cache = style_cache if isinstance(style_cache, dict) else None
-            key = (round(r, 6), round(g, 6), round(b, 6))
-
-            try:
-                psa = cache.get(key) if cache is not None else None
-                if psa is None:
-                    colour = model.create_entity("IfcColourRgb", None, r, g, b)
-
-                    # [FIXED FOR BIMVISION]
-                    # Use IfcSurfaceStyleShading. BIMVision handles Shading reliably.
-                    # Rendering often fails if not fully defined.
-                    shading = model.create_entity(
-                        "IfcSurfaceStyleShading",
-                        colour
-                    )
-
-                    surf_style = model.create_entity("IfcSurfaceStyle", None, "BOTH", [shading])
-                    psa = model.create_entity("IfcPresentationStyleAssignment", [surf_style])
-
-                    if cache is not None:
-                        cache[key] = psa
-
-                items = getattr(shape_rep, "Items", None) or []
-                for it in items:
-                    # 1) style the item itself
-                    try:
-                        model.create_entity("IfcStyledItem", it, [psa], None)
-                    except Exception:
-                        pass
-
-                    # 2) if Brep: style its outer shell too (BIMVision often reads here)
-                    try:
-                        if it.is_a("IfcFacetedBrep") and hasattr(it, "Outer") and it.Outer:
-                            model.create_entity("IfcStyledItem", it.Outer, [psa], None)
-                    except Exception:
-                        pass
-
-                return True, ""
-            except Exception as e:
-                return False, "apply_view_color failed: " + repr(e)
-
-
+        storey_name_str = str(StoreyName) if StoreyName is not None else "Storey"
+        ResolvedOutPath: str = normalize_outpath(OutPath, storey_name_str)
 
         # ---------------------------------------------------------------------
         # IFC setup
@@ -399,7 +92,7 @@ def export_ifc_from_matdata(
             "root.create_entity",
             model,
             ifc_class="IfcProject",
-            name=f"{StoreyName}_Export",
+            name=f"{storey_name_str}_Export",
         )
 
         ifc_run("unit.assign_unit", model, length={"is_metric": True, "raw": "MILLIMETRE"})
@@ -416,8 +109,12 @@ def export_ifc_from_matdata(
 
         site = ifc_run("root.create_entity", model, ifc_class="IfcSite", name="Default Site")
         building = ifc_run("root.create_entity", model, ifc_class="IfcBuilding", name="Default Building")
-        storey = ifc_run("root.create_entity", model, ifc_class="IfcBuildingStorey", name=str(StoreyName))
-        storey.Elevation = float(StoreyElev)
+        storey = ifc_run("root.create_entity", model, ifc_class="IfcBuildingStorey", name=storey_name_str)
+
+        try:
+            storey.Elevation = float(StoreyElev)
+        except Exception:
+            storey.Elevation = 0.0
 
         ifc_run("aggregate.assign_object", model, products=[site], relating_object=project)
         ifc_run("aggregate.assign_object", model, products=[building], relating_object=site)
@@ -436,6 +133,55 @@ def export_ifc_from_matdata(
             ifc_run("pset.edit_pset", model, pset=pset, properties=clean)
 
         # ---------------------------------------------------------------------
+        # Geometry helpers (keep local: exporter policy, not util)
+        # ---------------------------------------------------------------------
+        def brep_to_mesh(brep: "rg.Brep") -> Optional["rg.Mesh"]:
+            mp = rg.MeshingParameters.FastRenderMesh
+            meshes = rg.Mesh.CreateFromBrep(brep, mp)
+            if not meshes:
+                return None
+            m = rg.Mesh()
+            for part in meshes:
+                if part:
+                    m.Append(part)
+            m.Normals.ComputeNormals()
+            m.Compact()
+            return m
+
+        def geom_to_mesh(geo: Any) -> Optional["rg.Mesh"]:
+            if geo is None:
+                return None
+            if isinstance(geo, rg.Mesh):
+                m = geo.DuplicateMesh()
+                m.Normals.ComputeNormals()
+                m.Compact()
+                return m
+            if isinstance(geo, rg.Brep):
+                return brep_to_mesh(geo)
+            if isinstance(geo, rg.Extrusion):
+                return brep_to_mesh(geo.ToBrep(True))
+            if isinstance(geo, rg.Surface):
+                brep = geo.ToBrep()
+                return brep_to_mesh(brep)
+            brep = rg.Brep.TryConvertBrep(geo)
+            if brep:
+                return brep_to_mesh(brep)
+            return None
+
+        def mesh_to_vertices_faces(
+            mesh: "rg.Mesh",
+        ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[int, int, int]]]:
+            if mesh is None or mesh.Vertices.Count == 0:
+                return [], []
+            m = mesh.DuplicateMesh()
+            m.Faces.ConvertQuadsToTriangles()
+            m.Normals.ComputeNormals()
+            m.Compact()
+            verts = [(float(v.X), float(v.Y), float(v.Z)) for v in m.Vertices]
+            faces = [(int(f.A), int(f.B), int(f.C)) for f in m.Faces]
+            return verts, faces
+
+        # ---------------------------------------------------------------------
         # Element creation
         # ---------------------------------------------------------------------
         def category_to_ifc_class(cat: str) -> str:
@@ -447,11 +193,13 @@ def export_ifc_from_matdata(
             return "IfcBuildingElementProxy"
 
         def create_element(payload: Payload) -> Any:
+            props = ensure_props(payload)
+
             name = str(payload.get("name", "Unnamed"))
             cat = str(payload.get("category", "Unspecified"))
-            # Prefer payload-provided hint (DBML ifcClassHint) if present
-            hint = get_props(payload).get("ifc_class_hint")
-            if hint is not None and str(hint).strip() != "":
+
+            hint = props.get("ifc_class_hint")
+            if hint is not None and str(hint).strip():
                 ifc_class = str(hint).strip()
             else:
                 ifc_class = category_to_ifc_class(cat)
@@ -482,40 +230,32 @@ def export_ifc_from_matdata(
             )
             ifc_run("geometry.assign_representation", model, product=elem, representation=shape)
 
-            # viewer color (not material)
+            # viewer color
             name_key = (elem.Name or "").strip()
             rgb = resolve_view_color(name_key, COLOR_MAP, DEFAULT_VIEW_COLOR)
-            # ok, msg = apply_view_color(model, ifc_run, shape, rgb, transparency=0.0, style_cache=STYLE_CACHE)
             ok, msg = apply_view_color(model, shape, rgb, style_cache=STYLE_CACHE)
             if not ok:
                 log_add("[Color] " + msg + "\n")
             else:
                 log_add(".")
 
-#-------------------------------------------------------------------------------------------------------------------
-
-            uid = str(payload.get("unit_id", ""))
-            props = get_props(payload)
+            # psets (keep as your current conventions)
             scope = get_scope(payload)
             container_id = props.get("container_id")
 
-            part_no = get_val(payload, "part_no")
-            dims = get_dict(payload, "dims")
-            material = get_dict(payload, "material")
-            finish = get_dict(payload, "finish")
-            color_code = get_val(payload, "color_code")
-            source_guid = get_val(payload, "source_guid")
+            dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
+            material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
+            finish = props.get("finish", {}) if isinstance(props.get("finish"), dict) else {}
 
             add_pset(elem, "Pset_CWIdentity", {
                 "Scope": scope,
-                "UnitId": uid,
+                "UnitId": str(payload.get("unit_id", "")) or str(props.get("unit_id", "")),
                 "ContainerId": str(container_id) if container_id is not None else None,
-                "PartNo": part_no,
+                "PartNo": props.get("part_no"),
                 "Category": cat,
-                "SourceGuid": source_guid,
+                "SourceGuid": props.get("source_guid"),
             })
 
-            # DBML-aligned Part/Bulk psets (lightweight mapping)
             if scope == "BULK":
                 add_pset(elem, "Pset_Bulk", {
                     "BulkCode": str(payload.get("name", "")),
@@ -524,9 +264,9 @@ def export_ifc_from_matdata(
                 })
             else:
                 add_pset(elem, "Pset_Part", {
-                    "PartCode": part_no,
+                    "PartCode": props.get("part_no"),
                     "PartType": cat,
-                    "ProfileCode": part_no,
+                    "ProfileCode": props.get("part_no"),
                     "Material": material.get("name") if isinstance(material, dict) else None,
                     "Finish": finish.get("type") if isinstance(finish, dict) else None,
                     "Length": dims.get("L") if isinstance(dims, dict) else None,
@@ -548,162 +288,86 @@ def export_ifc_from_matdata(
             })
 
             add_pset(elem, "Pset_CWAppearance", {
-                "ColorCode": color_code,
+                "ColorCode": props.get("color_code"),
             })
 
             return elem
 
         # ---------------------------------------------------------------------
-        # Flatten -> regroup by container (UNIT + BULK)  (UPDATED)
+        # Payloads: collect + group by container
         # ---------------------------------------------------------------------
-        payloads: List[Payload] = list(iter_payloads(MatData))
+        payloads, bad = collect_payloads(MatData)
         if not payloads:
-            raise ValueError("MatData is empty (no payloads).")
+            raise ValueError(f"MatData is empty (no payloads). ignored_non_payload={bad}")
 
-        containers: Dict[Tuple[str, str], List[Payload]] = {}
-        for idx, pl in enumerate(payloads):
-            scope = get_scope(pl)
-            cid = get_container_id(pl)
-            containers.setdefault((scope, cid), []).append(pl)
+        containers = group_by_container(payloads)
 
-        # basic log header
         Log += f"ifcopenshell version: {getattr(ifcopenshell, 'version', 'unknown')}\n"
         Log += f"Resolved OutPath: {ResolvedOutPath}\n"
-        Log += f"Storey: {StoreyName} Elev(mm): {float(StoreyElev)}\n"
+        Log += f"Storey: {storey_name_str} Elev(mm): {storey.Elevation}\n"
         Log += f"Containers: {len(containers)} (UNIT+BULK)\n"
-        Log += f"Payloads(flat): {len(payloads)}\n"
+        Log += f"Payloads(flat): {len(payloads)} (ignored non-payload: {bad})\n"
 
         # ---------------------------------------------------------------------
-        # Multi-level assembly builder (PER CONTAINER)
+        # Build containers + nested assemblies, assign elements
         # ---------------------------------------------------------------------
-        def ensure_assembly_chain(
-            container_elem: Any,
-            scope: str,
-            container_id: str,
-            assembly_path: List[Dict[str, str]],
-            node_cache: Dict[Tuple[int, str], Any],
-        ) -> Any:
-            """
-            Create / reuse assemblies under `container_elem` following assembly_path.
-            Cache key = (id(parent), level_key)
-            Returns deepest assembly element.
-            """
-            parent = container_elem
-            depth = 0
-
-            for lvl in assembly_path:
-                depth += 1
-                nm = str(lvl.get("name", "")).strip()
-                ky = str(lvl.get("key", "")).strip()
-                if ky == "" and nm == "":
-                    continue
-                if ky == "":
-                    ky = nm
-                if nm == "":
-                    nm = ky
-
-                k = (id(parent), ky)
-                if k in node_cache:
-                    parent = node_cache[k]
-                    continue
-
-                asm = ifc_run(
-                    "root.create_entity",
-                    model,
-                    ifc_class="IfcElementAssembly",
-                    name=nm,
-                )
-
-                ifc_run("aggregate.assign_object", model, products=[asm], relating_object=parent)
-
-                # minimal traceability (low-noise)
-                ps = {"Scope": scope, "ContainerId": container_id, "Level": int(depth), "Name": nm}
-                if isinstance(lvl, dict) and lvl.get("role") not in (None, ""):
-                    ps["ChildRole"] = str(lvl.get("role"))
-                if ky != nm:
-                    ps["Key"] = ky
-                add_pset(asm, "Pset_AssemblyNode", ps)
-
-                # DBML-aligned 1:1-ish pset for assemblies (lightweight mapping)
-                add_pset(asm, "Pset_Assembly", {
-                    "AssemblyCode": ky,
-                    "AssemblyType": nm,
-                    "InstallType": None,
-                    "ChildRole": str(lvl.get("role")) if isinstance(lvl, dict) and lvl.get("role") not in (None, "") else None,
-                })
-
-                node_cache[k] = asm
-                parent = asm
-
-            return parent
-
         created_elements = 0
         created_containers = 0
         created_assembly_nodes = 0
 
-        # iterate containers
         for (scope, cid), items in containers.items():
             cname = container_display_name(scope, cid)
 
-            container = ifc_run(
-                "root.create_entity",
-                model,
-                ifc_class="IfcElementAssembly",
-                name=cname,
-            )
+            container = ifc_run("root.create_entity", model, ifc_class="IfcElementAssembly", name=cname)
             created_containers += 1
 
-            # container-specific pset (DBML-aligned)
+            # container pset
             if scope == "UNIT":
-                # Try to parse Level/Bay/Sequence from unit_id pattern like: 20250715_113723_N03F_64
-                uid = cid
-                level = None
-                bay = None
-                seq = None
-                m = __import__("re").match(r".*_([A-Za-z]?\d{2}F)_([A-Za-z0-9]+)$", uid)
-                if m:
-                    level = m.group(1)
-                    seq = m.group(2)
-                unit_code = uid if not (level and seq) else f"{level}_{seq}"
                 add_pset(container, "Pset_Unit", {
-                    "UnitCode": unit_code,
-                    "BayNo": bay,
-                    "Level": level,
+                    "UnitCode": cid,
+                    "BayNo": None,
+                    "Level": None,
                     "InstallSequence": None,
                 })
             else:
                 add_pset(container, "Pset_Bulk", {"BulkCode": cid, "ContainerId": cid})
 
-            # place container under storey
             ifc_run("spatial.assign_container", model, products=[container], relating_structure=storey)
 
-            # cache assemblies per container
+            # assembly nodes cache per container
             node_cache: Dict[Tuple[int, str], Any] = {}
 
-            grouped_count = 0
-            direct_count = 0
-            cats: List[str] = []
+            grouped = 0
+            direct = 0
 
             for pl in items:
-                cats.append(str(pl.get("category", "Unspecified")))
                 elem = create_element(pl)
                 created_elements += 1
 
-                apath = get_assembly_path(pl)
+                apath = parse_assembly_path(pl)
                 if apath:
-                    deepest = ensure_assembly_chain(container, scope, cid, apath, node_cache)
+                    deepest = ensure_assembly_chain(
+                        ifc_run=ifc_run,
+                        model=model,
+                        container_elem=container,
+                        scope=scope,
+                        container_id=cid,
+                        assembly_path=apath,
+                        node_cache=node_cache,
+                        add_pset=add_pset,
+                    )
                     ifc_run("aggregate.assign_object", model, products=[elem], relating_object=deepest)
-                    grouped_count += 1
+                    grouped += 1
                 else:
                     ifc_run("aggregate.assign_object", model, products=[elem], relating_object=container)
-                    direct_count += 1
+                    direct += 1
 
             created_assembly_nodes += len(node_cache)
 
             Log += (
                 f"{cname}: payloads={len(items)} "
-                f"with_assembly_path={grouped_count} direct_to_container={direct_count} "
-                f"assembly_nodes={len(node_cache)} cats={cats}\n"
+                f"with_assembly_path={grouped} direct_to_container={direct} "
+                f"assembly_nodes={len(node_cache)}\n"
             )
 
         model.write(ResolvedOutPath)
