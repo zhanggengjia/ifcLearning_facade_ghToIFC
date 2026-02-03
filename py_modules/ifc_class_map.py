@@ -23,6 +23,8 @@ CATEGORY_TO_IFC: Dict[str, str] = {
     "fastener": "IfcMechanicalFastener",
     "bolt": "IfcMechanicalFastener",
     "screw": "IfcMechanicalFastener",
+    "fitting": "IfcDiscreteAccessory",
+
 }
 
 def resolve_ifc_class_hint(category_value: str) -> str:

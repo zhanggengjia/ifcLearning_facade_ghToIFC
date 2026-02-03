@@ -26,28 +26,29 @@ from typing import Any, Dict, List, Tuple
 from ifc_types import Payload
 from utils.gh_utils import to_branch_dict_any, unwrap_gh
 from utils.payload_utils import normalize_payload_inplace
+from ifc_class_map import resolve_ifc_class_hint
 
 
 def _is_pair(x: Any) -> bool:
     return isinstance(x, (list, tuple)) and len(x) >= 2
 
 
-def build_bulk_matdata(
+def build_nonUnit_matdata(
     Obj: Any,
     Category: Any,
-    BulkContainerId: Any,
+    # NonUnitContainerId: Any,
     SchemaVersion: int = 1,
 ) -> Tuple[List[Payload], str]:
     if Obj is None:
-        return [], "bulk_builder: Obj is None."
+        return [], "nonUnit_builder: Obj is None."
 
     cat = str(unwrap_gh(Category) or "").strip()
     if not cat:
-        raise Exception("bulk_builder: Category is required.")
+        raise Exception("nonUnit_builder: Category is required.")
 
-    container_id = str(unwrap_gh(BulkContainerId) or "").strip()
-    if not container_id:
-        raise Exception("bulk_builder: BulkContainerId is required.")
+    # container_id = str(unwrap_gh(NonUnitContainerId) or "").strip()
+    # if not container_id:
+    #     raise Exception("nonUnit_builder: NonUnitContainerId is required.")
 
     matdata: List[Payload] = []
     count = 0
@@ -80,12 +81,13 @@ def build_bulk_matdata(
                 bad_leaf += 1
                 continue
 
+            ifc_class_hint = resolve_ifc_class_hint(cat)
             props: Dict[str, Any] = {
-                "scope": "BULK",
-                "kind": "Bulk",
+                "scope": "NON_UNIT",
+                "kind": "Part",
                 "element_code": part_no,
-                "ifc_class_hint": "IfcBuildingElementProxy",
-                "container_id": container_id,
+                "ifc_class_hint": ifc_class_hint,
+                # "container_id": container_id,
                 "part_no": part_no,
                 "source_guid": str(source_guid).strip() if source_guid is not None else None,
 
@@ -98,8 +100,8 @@ def build_bulk_matdata(
 
             payload: Payload = {
                 "schema": int(SchemaVersion),
-                # Bulk doesn't have Unit concept; keep placeholder for payload contract.
-                "unit_id": "__BULK__",
+                # Non_Unit doesn't have Unit concept; keep placeholder for payload contract.
+                "unit_id": "__NON_UNIT__",
                 "name": part_no,
                 "category": cat,
                 "geo": geo,
@@ -115,7 +117,8 @@ def build_bulk_matdata(
             matdata.append(payload)
             count += 1
 
-    log = f"bulk_builder: created {count} BULK payloads (container={container_id})."
+    # log = f"nonUnit_builder: created {count} NON_UNIT payloads (container={container_id})."
+    log = f"nonUnit_builder: created {count} NON_UNIT payloads."
     if bad_leaf:
         log += f" bad_leaf={bad_leaf}"
     return matdata, log

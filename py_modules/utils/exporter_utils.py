@@ -61,22 +61,22 @@ def get_scope(p: Payload) -> str:
     props = ensure_props(p)
     scope = props.get("scope", "UNIT")
     s = str(scope).strip().upper() if scope is not None else "UNIT"
-    return "BULK" if s == "BULK" else "UNIT"
+    return "NON_UNIT" if s == "NON_UNIT" else "UNIT"
 
 
 def get_container_id(p: Payload) -> str:
     """
     For UNIT: prefer payload["unit_id"], fallback props["unit_id"].
-    For BULK: use props["container_id"] (default "DEFAULT").
+    For NON_UNIT: use props["container_id"] (default "DEFAULT").
     """
     props = ensure_props(p)
     scope = get_scope(p)
 
-    if scope == "BULK":
-        cid = props.get("container_id", "DEFAULT")
-        c = str(cid).strip() if cid is not None else "DEFAULT"
-        return c if c else "DEFAULT"
+    # --- Scheme A: single NON_UNIT container ---
+    if scope == "NON_UNIT":
+        return "__NON_UNIT__"
 
+    # --- UNIT behavior unchanged ---
     uid = p.get("unit_id", None)
     if uid is None or str(uid).strip() == "":
         uid = props.get("unit_id", None)
@@ -88,7 +88,10 @@ def get_container_id(p: Payload) -> str:
 
 
 def container_display_name(scope: str, cid: str) -> str:
-    return f"Bulk_{cid}" if scope == "BULK" else f"Unit_{cid}"
+    if scope == "NON_UNIT":
+        return "NON_UNIT"
+    return f"Unit_{cid}"
+
 
 
 def group_by_container(payloads: List[Payload]) -> Dict[Tuple[str, str], List[Payload]]:

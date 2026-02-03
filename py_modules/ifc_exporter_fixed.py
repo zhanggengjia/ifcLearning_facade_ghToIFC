@@ -256,7 +256,7 @@ def export_ifc_from_matdata(
                 "SourceGuid": props.get("source_guid"),
             })
 
-            if scope == "BULK":
+            if scope == "BULK_MATERIAL":
                 add_pset(elem, "Pset_Bulk", {
                     "BulkCode": str(payload.get("name", "")),
                     "Quantity": None,
@@ -305,7 +305,7 @@ def export_ifc_from_matdata(
         Log += f"ifcopenshell version: {getattr(ifcopenshell, 'version', 'unknown')}\n"
         Log += f"Resolved OutPath: {ResolvedOutPath}\n"
         Log += f"Storey: {storey_name_str} Elev(mm): {storey.Elevation}\n"
-        Log += f"Containers: {len(containers)} (UNIT+BULK)\n"
+        Log += f"Containers: {len(containers)} (UNIT/NON_UNIT/BULK_MATERIAL)\n"
         Log += f"Payloads(flat): {len(payloads)} (ignored non-payload: {bad})\n"
 
         # ---------------------------------------------------------------------
@@ -329,8 +329,10 @@ def export_ifc_from_matdata(
                     "Level": None,
                     "InstallSequence": None,
                 })
-            else:
+            elif scope == "BULK_MATERIAL":
                 add_pset(container, "Pset_Bulk", {"BulkCode": cid, "ContainerId": cid})
+            else:
+                add_pset(container, "Pset_NonUnit", {"GroupCode": cid,"Scope": scope,})
 
             ifc_run("spatial.assign_container", model, products=[container], relating_structure=storey)
 
@@ -375,7 +377,7 @@ def export_ifc_from_matdata(
         OK = True
         Log += "\n"
         Log += f"Created elements: {created_elements}\n"
-        Log += f"Created containers (UNIT+BULK): {created_containers}\n"
+        Log += f"Created containers (UNIT+NONUNIT+BULK): {created_containers}\n"
         Log += f"Created assembly nodes (all containers): {created_assembly_nodes}\n"
         Log += f"Wrote: {ResolvedOutPath}\n"
 
