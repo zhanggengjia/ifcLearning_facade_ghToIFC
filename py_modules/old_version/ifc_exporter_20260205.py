@@ -34,9 +34,6 @@ from utils.exporter_utils import (
     container_display_name,
     parse_assembly_path,
     ensure_assembly_chain,
-    resolve_guid_json_path,
-    locked_guid_db,
-    ensure_source_guid_from_json_inplace,
 )
 
 
@@ -303,21 +300,10 @@ def export_ifc_from_matdata(
         if not payloads:
             raise ValueError(f"MatData is empty (no payloads). ignored_non_payload={bad}")
 
-        # -----------------------------------------------------------------
-        # Stable source_guid assignment (JSON-backed)
-        # - Builder may output props['source_guid']=None.
-        # - We key by (unit_id, part name, bbox center) and persist to guid_file.json.
-        # -----------------------------------------------------------------
-        guid_json_path = resolve_guid_json_path(ResolvedOutPath)
-        with locked_guid_db(guid_json_path) as guid_db:
-            for p in payloads:
-                ensure_source_guid_from_json_inplace(p, guid_db, decimals=3)
-
         containers = group_by_container(payloads)
 
         Log += f"ifcopenshell version: {getattr(ifcopenshell, 'version', 'unknown')}\n"
         Log += f"Resolved OutPath: {ResolvedOutPath}\n"
-        Log += f"Guid JSON: {guid_json_path}\n"
         Log += f"Storey: {storey_name_str} Elev(mm): {storey.Elevation}\n"
         Log += f"Containers: {len(containers)} (UNIT/NON_UNIT/BULK_MATERIAL)\n"
         Log += f"Payloads(flat): {len(payloads)} (ignored non-payload: {bad})\n"
