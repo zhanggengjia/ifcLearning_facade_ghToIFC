@@ -30,6 +30,8 @@ from utils.exporter_utils import (
     collect_payloads,
     group_by_container,
     get_scope,
+    get_kind,
+    build_psets_for_payload,
     container_display_name,
     parse_assembly_path,
     ensure_assembly_chain,
@@ -239,55 +241,14 @@ def export_ifc_from_matdata(
             if not ok:
                 log_add("[Color] " + msg + "\n")
 
-            # psets (keep as your current conventions)
-            scope = get_scope(payload)
+            # psets (scope controls container; kind controls element semantics)
+            scope = get_scope(payload)   # "UNIT" | "NON_UNIT"
+            kind = get_kind(payload)     # "Part" | "Bulk" (or default "Part")
 
-            dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
-            material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
-            finish = props.get("finish", {}) if isinstance(props.get("finish"), dict) else {}
+            # Let exporter_utils decide which Psets to write based on props schema.
+            for pset_name, pset_props in build_psets_for_payload(payload, scope=scope, kind=kind):
+                add_pset(elem, pset_name, pset_props)
 
-            add_pset(elem, "Pset_CWIdentity", {
-                "Scope": scope,
-                "UnitId": str(payload.get("unit_id", "")) or str(props.get("unit_id", "")),
-                "PartNo": props.get("part_no"),
-                "Category": cat,
-                "SourceGuid": props.get("source_guid"),
-            })
-
-            if scope == "BULK_MATERIAL":
-                add_pset(elem, "Pset_Bulk", {
-                    "BulkCode": str(payload.get("name", "")),
-                    "Quantity": None,
-                    "InstallLocation": None,
-                })
-            else:
-                add_pset(elem, "Pset_Part", {
-                    "PartCode": props.get("part_no"),
-                    "PartType": cat,
-                    "ProfileCode": props.get("part_no"),
-                    "Material": material.get("name") if isinstance(material, dict) else None,
-                    "Finish": finish.get("type") if isinstance(finish, dict) else None,
-                    "Length": dims.get("L") if isinstance(dims, dict) else None,
-                })
-
-            add_pset(elem, "Pset_CWDimensions", {
-                "Length_mm": dims.get("L"),
-                "Width_mm": dims.get("W"),
-                "Radius_mm": dims.get("R"),
-            })
-
-            add_pset(elem, "Pset_CWMaterial", {
-                "MaterialName": material.get("name"),
-            })
-
-            add_pset(elem, "Pset_CWSurfaceFinish", {
-                "FinishType": finish.get("type"),
-                "FinishThickness_um": finish.get("thickness_um"),
-            })
-
-            add_pset(elem, "Pset_CWAppearance", {
-                "ColorCode": props.get("color_code"),
-            })
 
             return elem
 
@@ -314,7 +275,7 @@ def export_ifc_from_matdata(
         Log += f"Resolved OutPath: {ResolvedOutPath}\n"
         Log += f"Guid JSON: {guid_json_path}\n"
         Log += f"Storey: {storey_name_str} Elev(mm): {storey.Elevation}\n"
-        Log += f"Containers: {len(containers)} (UNIT/NON_UNIT/BULK_MATERIAL)\n"
+        Log += f"Containers: {len(containers)} (UNIT/NON_UNIT)\n"
         Log += f"Payloads(flat): {len(payloads)} (ignored non-payload: {bad})\n"
 
         # ---------------------------------------------------------------------
@@ -338,10 +299,12 @@ def export_ifc_from_matdata(
                     "Level": None,
                     "InstallSequence": None,
                 })
-            elif scope == "BULK_MATERIAL":
-                add_pset(container, "Pset_Bulk", {"BulkCode": cid, "ContainerId": cid})
             else:
-                add_pset(container, "Pset_NonUnit", {"GroupCode": cid,"Scope": scope,})
+                # NON_UNIT container only
+                add_pset(container, "Pset_NonUnit", {
+                    "GroupCode": cid,
+                    "Scope": scope,
+                })
 
             ifc_run("spatial.assign_container", model, products=[container], relating_structure=storey)
 

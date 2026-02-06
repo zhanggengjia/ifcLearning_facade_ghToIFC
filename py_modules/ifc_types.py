@@ -9,6 +9,33 @@ Shared type contracts for:
 Rule:
 - Keep "stable core" keys at top-level (unit_id/name/geo/category/schema).
 - Put everything evolving into `props`.
+
+
+2026-02-06
+Payload schema reference (short version)
+
+scope:
+    UNIT | NON_UNIT
+    container ownership only
+
+kind:
+    Part | Bulk
+    semantic element type
+
+Part props:
+    part_no
+    dims{L,W,R}
+    material{name}
+    finish{type}
+    source_guid
+
+Bulk props:
+    bulk_code
+    quantity / area_m2 / length_m
+    source_guid
+
+GUID assigned in exporter only.
+Builders must not generate GUID.
 """
 
 from __future__ import annotations
