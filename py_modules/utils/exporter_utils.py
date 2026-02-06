@@ -322,10 +322,10 @@ def bbox_center_key(geo: Any, *, decimals: int = 3) -> str:
         except Exception:
             bb = None
 
-    if bb is None or (hasattr(bb, "IsValid") and not bb.IsValid):
+    if bb is None or (hasattr(bb, "IsValid") and not bb.IsValid): # type: ignore
         raise ValueError(f"bbox_center_key: cannot compute bounding box. geo_type={type(geo).__name__}")
 
-    c = bb.Center
+    c = bb.Center # type: ignore
     return _point_key_xyz(c.X, c.Y, c.Z, decimals=decimals)
 
 
@@ -403,50 +403,91 @@ def locked_guid_db(json_path: str, *, timeout_s: float = 0.4) -> Any:
 def guid_db_get_or_create(
     db: Dict[str, Any],
     *,
-    unit_id: str,
+    storey_name: str,
+    unit_key: str,
     part_name: str,
     center_key: str,
 ) -> str:
-    """Schema: db[unit_id][part_name][center_key] = guid_str"""
-    u = db.get(unit_id)
-    if not isinstance(u, dict):
-        u = {}
-        db[unit_id] = u
+    """
+    Schema:
+      db[storey_name][unit_key][part_name][center_key] = guid_str
 
-    n = u.get(part_name)
-    if not isinstance(n, dict):
-        n = {}
-        u[part_name] = n
+    where:
+      - storey_name e.g. "N02F"
+      - unit_key    e.g. "__NON_UNIT__" or a real unit_id
+    """
+    s = str(storey_name or "").strip() or "__STOREY__"
+    ukey = str(unit_key or "").strip() or "__UNIT__"
+    pname = str(part_name or "").strip() or "Unnamed"
+    ckey = str(center_key or "").strip() or "0.000,0.000,0.000"
 
-    existing = n.get(center_key)
+    storey_dict = db.get(s)
+    if not isinstance(storey_dict, dict):
+        storey_dict = {}
+        db[s] = storey_dict
+
+    unit_dict = storey_dict.get(ukey)
+    if not isinstance(unit_dict, dict):
+        unit_dict = {}
+        storey_dict[ukey] = unit_dict
+
+    name_dict = unit_dict.get(pname)
+    if not isinstance(name_dict, dict):
+        name_dict = {}
+        unit_dict[pname] = name_dict
+
+    existing = name_dict.get(ckey)
     if isinstance(existing, str) and existing.strip():
         return existing.strip()
 
     g = str(uuid.uuid4())
-    n[center_key] = g
+    name_dict[ckey] = g
     return g
+
 
 
 def ensure_source_guid_from_json_inplace(
     p: Payload,
     db: Dict[str, Any],
     *,
+    storey_name: str,
     decimals: int = 3,
 ) -> str:
-    """If props['source_guid'] is missing/empty, compute and assign stable guid."""
+    """
+    If props['source_guid'] is missing/empty, compute and assign stable guid.
+
+    Key rule:
+      storey_name -> (unit_key or __NON_UNIT__) -> part_name -> bbox_center
+    """
     props = ensure_props(p)
+
     cur = props.get("source_guid")
     if isinstance(cur, str) and cur.strip():
         return cur.strip()
 
-    unit_id = get_unit_id_for_guid(p)
-    part_name = str(p.get("name", "") or "").strip()
-    if not part_name:
-        part_name = "Unnamed"
+    # --- unit_key ---
+    # Keep your current behavior: NON_UNIT uses "__NON_UNIT__"
+    # UNIT uses real unit_id
+    try:
+        unit_key = get_unit_id_for_guid(p)  # if your get_unit_id_for_guid already returns "__NON_UNIT__" for nonunit, keep it
+    except Exception:
+        # extra safety: if any nonunit variant slips through without uid
+        unit_key = "__NON_UNIT__"
+
+    part_name = str(p.get("name", "") or "").strip() or "Unnamed"
 
     geo = p.get("geo", None)
     ckey = bbox_center_key(geo, decimals=decimals)
-    guid_str = guid_db_get_or_create(db, unit_id=unit_id, part_name=part_name, center_key=ckey)
+
+    guid_str = guid_db_get_or_create(
+        db,
+        storey_name=storey_name,
+        unit_key=unit_key,
+        part_name=part_name,
+        center_key=ckey,
+    )
+
     props["source_guid"] = guid_str
     return guid_str
+
 

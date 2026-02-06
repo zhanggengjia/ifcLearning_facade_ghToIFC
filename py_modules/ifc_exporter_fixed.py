@@ -30,7 +30,6 @@ from utils.exporter_utils import (
     collect_payloads,
     group_by_container,
     get_scope,
-    get_container_id,
     container_display_name,
     parse_assembly_path,
     ensure_assembly_chain,
@@ -239,12 +238,9 @@ def export_ifc_from_matdata(
             ok, msg = apply_view_color(model, shape, rgb, style_cache=STYLE_CACHE)
             if not ok:
                 log_add("[Color] " + msg + "\n")
-            else:
-                log_add(".")
 
             # psets (keep as your current conventions)
             scope = get_scope(payload)
-            container_id = props.get("container_id")
 
             dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
             material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
@@ -253,7 +249,6 @@ def export_ifc_from_matdata(
             add_pset(elem, "Pset_CWIdentity", {
                 "Scope": scope,
                 "UnitId": str(payload.get("unit_id", "")) or str(props.get("unit_id", "")),
-                "ContainerId": str(container_id) if container_id is not None else None,
                 "PartNo": props.get("part_no"),
                 "Category": cat,
                 "SourceGuid": props.get("source_guid"),
@@ -311,7 +306,7 @@ def export_ifc_from_matdata(
         guid_json_path = resolve_guid_json_path(ResolvedOutPath)
         with locked_guid_db(guid_json_path) as guid_db:
             for p in payloads:
-                ensure_source_guid_from_json_inplace(p, guid_db, decimals=3)
+                ensure_source_guid_from_json_inplace(p, guid_db, storey_name=storey_name_str, decimals=3)
 
         containers = group_by_container(payloads)
 
