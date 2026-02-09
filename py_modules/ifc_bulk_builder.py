@@ -25,8 +25,9 @@ from typing import Any, Dict, List, Tuple
 from ifc_types import AnyInput, Payload, PathStr
 from ifc_class_map import resolve_ifc_class_hint
 
-from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh
+from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh, is_datatree_like, new_datatree, add_to_datatree
 from utils.payload_utils import normalize_payload_inplace
+from utils.override_utils import apply_overrides_to_props
 
 
 def build_bulk_matdata(
@@ -34,6 +35,7 @@ def build_bulk_matdata(
     Category: AnyInput,
     Scope: Any,
     UnitId: AnyInput,
+    Overrides: Any = None,
     SchemaVersion: int = 1,
     default_category: str = "Unspecified",
     default_scope: str = "NON_UNIT",
@@ -116,6 +118,10 @@ def build_bulk_matdata(
                 "unit_id": unit_id,
             }
 
+
+            # User-defined Pset overrides (from GH)
+            apply_overrides_to_props(props, Overrides, unit_id=unit_id)
+
             payload: Payload = {
                 "schema": int(SchemaVersion),
                 "unit_id": unit_id,
@@ -130,11 +136,15 @@ def build_bulk_matdata(
             branch_items.append(wrap_gh(payload))
             payload_count += 1
 
-        out.append(branch_items)
+        if out_tree is not None:
+            for it in branch_items:
+                add_to_datatree(out_tree, p, it)
+        else:
+            out_list.append(branch_items)
         logs.append(
             f"{p} -> Bulk scope={scope} unit={unit_id}: payloads={payload_count}"
             + (f" | bad_leaf={bad_leaf}" if bad_leaf else "")
             + f" | Cat={cat_value}"
         )
 
-    return out, "\n".join(logs)
+    return (out_tree if out_tree is not None else out_list), "\n".join(logs)

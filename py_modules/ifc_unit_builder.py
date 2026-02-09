@@ -26,8 +26,9 @@ from ifc_class_map import resolve_ifc_class_hint
 
 from ifc_types import AnyInput, Payload, PathStr
 
-from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh
+from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh, is_datatree_like, new_datatree, add_to_datatree
 from utils.payload_utils import normalize_payload_inplace
+from utils.override_utils import apply_overrides_to_props
 
 
 def build_matdata(
@@ -36,7 +37,7 @@ def build_matdata(
     UnitId: AnyInput,
     schema_version: int = 1,
     default_category: str = "Unspecified",
-) -> Tuple[List[List[Any]], str]:
+) -> Tuple[Any, str]:
     """
     Build MatData payloads for UNIT scope.
     This function keeps your original MatData shape (branches preserved).
@@ -45,8 +46,11 @@ def build_matdata(
     CatD, CatP = to_branch_dict_any(Category)
     UidD, UidP = to_branch_dict_any(UnitId)
 
-    all_paths: List[PathStr] = sorted(set(ObjP) | set(UidP) | set(CatP))
-    out: List[List[Any]] = []
+    all_paths: List[PathStr] = list(ObjP)
+    # Keep Obj branches as the semantic truth (Strategy S1)
+    want_tree = is_datatree_like(Obj)
+    out_tree = new_datatree() if want_tree else None
+    out_list: List[List[Any]] = []
     logs: List[str] = []
 
     for p in all_paths:
@@ -82,11 +86,12 @@ def build_matdata(
             geo = pair[0]
             raw_name = str(unwrap_gh(pair[1]) or "")
 
-            # Keep your naming convention
+            # Keep legacy naming convention for PartNo extraction.
+            # GUID assignment is handled in exporter (JSON-backed), so we DO NOT bind it here.
             if "_" in raw_name:
-                part_no, source_guid = raw_name.rsplit("_", 1)
+                part_no, _legacy_guid = raw_name.rsplit("_", 1)
             else:
-                part_no, source_guid = raw_name, None
+                part_no, _legacy_guid = raw_name, None
 
             part_no = str(part_no).strip()
             if not part_no:
@@ -99,7 +104,8 @@ def build_matdata(
                 "ifc_class_hint": ifc_class_hint,
 
                 "part_no": part_no,
-                "source_guid": str(source_guid).strip() if source_guid is not None else None,
+                # exporter will assign stable GUID
+                "source_guid": None,
 
                 # keep same reserved bags as your old builder
                 "dims": {"L": None, "W": None, "R": None},
@@ -111,6 +117,10 @@ def build_matdata(
                 "unit_id": unit_id,
                 "scope": "UNIT",
             }
+
+            # Optional GH override payload: 3rd slot from override component
+            if len(pair) >= 3:
+                apply_overrides_to_props(props, pair[2])
 
             payload: Payload = {
                 "schema": int(schema_version),
@@ -130,11 +140,15 @@ def build_matdata(
             branch_items.append(wrap_gh(payload))
             payload_count += 1
 
-        out.append(branch_items)
+        if out_tree is not None:
+            for it in branch_items:
+                add_to_datatree(out_tree, p, it)
+        else:
+            out_list.append(branch_items)
         logs.append(
             f"{p} -> Unit {unit_id}: payloads={payload_count}"
             + (f" | bad_leaf={bad_leaf}" if bad_leaf else "")
             + f" | Cat={cat_value}"
         )
 
-    return out, "\n".join(logs)
+    return (out_tree if out_tree is not None else out_list), "\n".join(logs)

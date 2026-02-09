@@ -55,6 +55,78 @@ def wrap_gh(x: Any) -> Any:
     return x
 
 
+
+# --- DataTree output helpers (additive) --------------------------------
+try:
+    import Grasshopper as gh  # type: ignore
+    from Grasshopper import DataTree  # type: ignore
+    from Grasshopper.Kernel.Data import GH_Path  # type: ignore
+except Exception:  # pragma: no cover
+    gh = None
+    DataTree = None  # type: ignore
+    GH_Path = None  # type: ignore
+
+
+def _parse_path_tokens(path_str: str) -> List[int]:
+    """Parse a GH path string like '{0;1;2}' into integer tokens [0,1,2]."""
+    s = (path_str or "").strip()
+    if s.startswith("{") and s.endswith("}"):
+        s = s[1:-1]
+    if not s:
+        return [0]
+    out: List[int] = []
+    for part in s.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except Exception:
+            out.append(0)
+    return out or [0]
+
+
+def pathstr_to_ghpath(path_str: str) -> Any:
+    """Return GH_Path for a path string; returns None if GH types are unavailable."""
+    if GH_Path is None:
+        return None
+    toks = _parse_path_tokens(path_str)
+    try:
+        return GH_Path(*toks)  # type: ignore
+    except Exception:
+        try:
+            return GH_Path(0)  # type: ignore
+        except Exception:
+            return None
+
+
+def new_datatree() -> Any:
+    """Create a DataTree[object] if available; else return None."""
+    if DataTree is None:
+        return None
+    try:
+        return DataTree[object]()  # type: ignore
+    except Exception:
+        try:
+            return DataTree[object]  # type: ignore
+        except Exception:
+            return None
+
+
+def add_to_datatree(tree: Any, path_str: str, item: Any) -> None:
+    """Safely add an item to a DataTree at the given GH path string."""
+    if tree is None:
+        return
+    ghp = pathstr_to_ghpath(path_str)
+    if ghp is None:
+        return
+    try:
+        tree.Add(item, ghp)
+    except Exception:
+        # last-resort: ignore
+        return
+
+
 def to_branch_dict_any(x: AnyInput) -> Tuple[BranchDict, List[PathStr]]:
     """
     Normalize an input into a (branch_dict, paths) pair.

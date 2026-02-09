@@ -24,8 +24,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 from ifc_types import Payload
-from utils.gh_utils import to_branch_dict_any, unwrap_gh
+from utils.gh_utils import to_branch_dict_any, unwrap_gh, wrap_gh, is_datatree_like, new_datatree, add_to_datatree
 from utils.payload_utils import normalize_payload_inplace
+from utils.override_utils import apply_overrides_to_props
 from ifc_class_map import resolve_ifc_class_hint
 
 
@@ -38,7 +39,7 @@ def build_nonUnit_matdata(
     Category: Any,
     # NonUnitContainerId: Any,
     SchemaVersion: int = 1,
-) -> Tuple[List[Payload], str]:
+) -> Tuple[Any, str]:
     if Obj is None:
         return [], "nonUnit_builder: Obj is None."
 
@@ -50,7 +51,9 @@ def build_nonUnit_matdata(
     # if not container_id:
     #     raise Exception("nonUnit_builder: NonUnitContainerId is required.")
 
-    matdata: List[Payload] = []
+    want_tree = is_datatree_like(Obj)
+    out_tree = new_datatree() if want_tree else None
+    out_list: List[Payload] = []
     count = 0
     bad_leaf = 0
 
@@ -70,11 +73,12 @@ def build_nonUnit_matdata(
                 bad_leaf += 1
                 continue
 
-            # Keep your naming convention
+            # Keep legacy naming convention for PartNo extraction.
+            # GUID assignment is handled in exporter (JSON-backed), so we DO NOT bind it here.
             if "_" in raw_name:
-                part_no, source_guid = raw_name.rsplit("_", 1)
+                part_no, _legacy_guid = raw_name.rsplit("_", 1)
             else:
-                part_no, source_guid = raw_name, None
+                part_no, _legacy_guid = raw_name, None
 
             part_no = str(part_no).strip()
             if not part_no:
@@ -89,7 +93,8 @@ def build_nonUnit_matdata(
                 "ifc_class_hint": ifc_class_hint,
                 # "container_id": container_id,
                 "part_no": part_no,
-                "source_guid": str(source_guid).strip() if source_guid is not None else None,
+                # exporter will assign stable GUID
+                "source_guid": None,
 
                 # keep same reserved bags as your old builder
                 "dims": {"L": None, "W": None, "R": None},
@@ -108,17 +113,24 @@ def build_nonUnit_matdata(
                 "props": props,
             }
 
+            # Optional GH override payload: 3rd slot from override component
+            if isinstance(pair, (list, tuple)) and len(pair) >= 3:
+                apply_overrides_to_props(props, pair[2])
+
             normalize_payload_inplace(
                 payload,
                 default_schema=int(SchemaVersion),
                 default_category=cat,
             )
 
-            matdata.append(payload)
+            if out_tree is not None:
+                add_to_datatree(out_tree, p, wrap_gh(payload))
+            else:
+                out_list.append(payload)
             count += 1
 
     # log = f"nonUnit_builder: created {count} NON_UNIT payloads (container={container_id})."
     log = f"nonUnit_builder: created {count} NON_UNIT payloads."
     if bad_leaf:
         log += f" bad_leaf={bad_leaf}"
-    return matdata, log
+    return (out_tree if out_tree is not None else out_list), log

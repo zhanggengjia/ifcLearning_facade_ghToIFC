@@ -241,14 +241,25 @@ def export_ifc_from_matdata(
             if not ok:
                 log_add("[Color] " + msg + "\n")
 
-            # psets (scope controls container; kind controls element semantics)
-            scope = get_scope(payload)   # "UNIT" | "NON_UNIT"
-            kind = get_kind(payload)     # "Part" | "Bulk" (or default "Part")
+            # psets
+            # - scope controls container ownership (UNIT / NON_UNIT)
+            # - kind controls element semantics (Part / Bulk)
+            scope = get_scope(payload)
+            kind = get_kind(payload)
 
-            # Let exporter_utils decide which Psets to write based on props schema.
+            # Core Psets (schema-driven)
             for pset_name, pset_props in build_psets_for_payload(payload, scope=scope, kind=kind):
                 add_pset(elem, pset_name, pset_props)
 
+            # User overrides (from GH override component)
+            overrides = props.get("pset_overrides")
+            if isinstance(overrides, dict):
+                for pset_name, kv in overrides.items():
+                    if not isinstance(pset_name, str) or not pset_name.strip():
+                        continue
+                    if not isinstance(kv, dict):
+                        continue
+                    add_pset(elem, pset_name.strip(), kv)
 
             return elem
 
@@ -300,11 +311,7 @@ def export_ifc_from_matdata(
                     "InstallSequence": None,
                 })
             else:
-                # NON_UNIT container only
-                add_pset(container, "Pset_NonUnit", {
-                    "GroupCode": cid,
-                    "Scope": scope,
-                })
+                add_pset(container, "Pset_NonUnit", {"GroupCode": cid, "Scope": scope})
 
             ifc_run("spatial.assign_container", model, products=[container], relating_structure=storey)
 
@@ -315,10 +322,48 @@ def export_ifc_from_matdata(
             direct = 0
 
             for pl in items:
+                # -----------------------------------------------------------------
+                # AssemblyMeta payloads (no geometry): write psets to the assembly node
+                # -----------------------------------------------------------------
+                try:
+                    props = ensure_props(pl)
+                except Exception:
+                    props = {}
+
+                cat = str(pl.get("category", "") or "").strip()
+                is_meta = (cat == "__ASSEMBLY_META__") or (pl.get("geo", "__HAS_GEO__") is None)
+
+                apath = parse_assembly_path(pl)
+
+                if is_meta:
+                    if apath:
+                        deepest = ensure_assembly_chain(
+                            ifc_run=ifc_run,
+                            model=model,
+                            container_elem=container,
+                            scope=scope,
+                            container_id=cid,
+                            assembly_path=apath,
+                            node_cache=node_cache,
+                            add_pset=add_pset,
+                        )
+                        overrides = props.get("pset_overrides")
+                        if isinstance(overrides, dict):
+                            for pset_name, kv in overrides.items():
+                                if not isinstance(pset_name, str) or not pset_name.strip():
+                                    continue
+                                if not isinstance(kv, dict):
+                                    continue
+                                add_pset(deepest, pset_name.strip(), kv)
+                        grouped += 1
+                    continue
+
+                # -----------------------------------------------------------------
+                # Normal element payloads
+                # -----------------------------------------------------------------
                 elem = create_element(pl)
                 created_elements += 1
 
-                apath = parse_assembly_path(pl)
                 if apath:
                     deepest = ensure_assembly_chain(
                         ifc_run=ifc_run,
@@ -349,7 +394,7 @@ def export_ifc_from_matdata(
         OK = True
         Log += "\n"
         Log += f"Created elements: {created_elements}\n"
-        Log += f"Created containers (UNIT+NONUNIT+BULK): {created_containers}\n"
+        Log += f"Created containers (UNIT+NON_UNIT): {created_containers}\n"
         Log += f"Created assembly nodes (all containers): {created_assembly_nodes}\n"
         Log += f"Wrote: {ResolvedOutPath}\n"
 

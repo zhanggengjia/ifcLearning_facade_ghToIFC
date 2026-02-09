@@ -59,35 +59,9 @@ def collect_payloads(MatData: Any) -> Tuple[List[Payload], int]:
 
 def get_scope(p: Payload) -> str:
     props = ensure_props(p)
-    raw = props.get("scope", "UNIT")
-    s = str(raw).strip().upper() if raw is not None else "UNIT"
-
-    if s == "NON_UNIT":
-        return "NON_UNIT"
-    if s == "UNIT":
-        return "UNIT"
-
-    # legacy/unknown: infer by unit_id
-    uid = p.get("unit_id", None) or props.get("unit_id", None)
-    uid_s = str(uid or "").strip()
-    return "UNIT" if uid_s and uid_s != "__NON_UNIT__" else "NON_UNIT"
-
-
-def get_kind(p: Payload) -> str:
-    props = ensure_props(p)
-    k = props.get("kind")
-    if isinstance(k, str) and k.strip():
-        kk = k.strip().lower()
-        if kk in ("bulk", "bulk_material", "bulkmaterial"):
-            return "Bulk"
-        if kk == "part":
-            return "Part"
-        return k.strip()
-    # legacy
-    raw_scope = props.get("scope")
-    if isinstance(raw_scope, str) and raw_scope.strip().upper() == "BULK_MATERIAL":
-        return "Bulk"
-    return "Part"
+    scope = props.get("scope", "UNIT")
+    s = str(scope).strip().upper() if scope is not None else "UNIT"
+    return "NON_UNIT" if s == "NON_UNIT" else "UNIT"
 
 
 def get_container_id(p: Payload) -> str:
@@ -113,6 +87,109 @@ def get_container_id(p: Payload) -> str:
     return str(uid).strip()
 
 
+# ---------------------------------------------------------------------
+# Scope / kind helpers
+# ---------------------------------------------------------------------
+
+def get_kind(p: Payload) -> str:
+    """Return element semantic kind.
+
+    Allowed (normalized): "Part" | "Bulk".
+    Defaults to "Part" if missing/unknown.
+    """
+    props = ensure_props(p)
+    k = props.get("kind", "Part")
+    s = str(k).strip().lower() if k is not None else "part"
+    return "Bulk" if s == "bulk" else "Part"
+
+
+def build_psets_for_payload(
+    p: Payload,
+    *,
+    scope: str,
+    kind: str,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Build core Psets for an element based on (scope, kind, props).
+
+    This keeps exporter small: exporter only iterates the returned psets.
+
+    Notes:
+    - `scope` is container ownership: UNIT | NON_UNIT
+    - `kind` is element semantics: Part | Bulk
+    """
+    props = ensure_props(p)
+    cat = str(p.get("category", "Unspecified") or "Unspecified")
+    unit_id = str(p.get("unit_id", "") or props.get("unit_id", "") or "")
+
+    dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
+    material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
+    finish = props.get("finish", {}) if isinstance(props.get("finish"), dict) else {}
+
+    part_no = props.get("part_no")
+    bulk_code = props.get("bulk_code")
+    element_code = props.get("element_code")
+    src_guid = props.get("source_guid")
+
+    # Identity (always)
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    out.append((
+        "Pset_CWIdentity",
+        {
+            "Scope": scope,
+            "UnitId": unit_id,
+            "ElementCode": element_code,
+            "PartNo": part_no,
+            "Category": cat,
+            "SourceGuid": src_guid,
+        },
+    ))
+
+    # Kind-specific
+    if kind == "Bulk":
+        out.append((
+            "Pset_Bulk",
+            {
+                "BulkCode": bulk_code or element_code or str(p.get("name", "") or ""),
+                "Quantity": props.get("quantity"),
+                "Area_m2": props.get("area_m2"),
+                "Length_m": props.get("length_m"),
+                "InstallLocation": props.get("install_location"),
+            },
+        ))
+    else:
+        out.append((
+            "Pset_Part",
+            {
+                "PartCode": part_no or element_code,
+                "PartType": cat,
+                "ProfileCode": part_no or element_code,
+                "Material": material.get("name") if isinstance(material, dict) else None,
+                "Finish": finish.get("type") if isinstance(finish, dict) else None,
+                "Length": dims.get("L") if isinstance(dims, dict) else None,
+            },
+        ))
+
+        out.append((
+            "Pset_CWDimensions",
+            {
+                "Length_mm": dims.get("L"),
+                "Width_mm": dims.get("W"),
+                "Radius_mm": dims.get("R"),
+            },
+        ))
+        out.append(("Pset_CWMaterial", {"MaterialName": material.get("name")}))
+        out.append((
+            "Pset_CWSurfaceFinish",
+            {
+                "FinishType": finish.get("type"),
+                "FinishThickness_um": finish.get("thickness_um"),
+            },
+        ))
+        out.append(("Pset_CWAppearance", {"ColorCode": props.get("color_code")}))
+
+    return out
+
+
 def container_display_name(scope: str, cid: str) -> str:
     if scope == "NON_UNIT":
         return "NON_UNIT"
@@ -127,67 +204,6 @@ def group_by_container(payloads: List[Payload]) -> Dict[Tuple[str, str], List[Pa
         cid = get_container_id(p)
         out.setdefault((scope, cid), []).append(p)
     return out
-
-
-def build_psets_for_payload(p: Payload, *, scope: str, kind: str) -> List[Tuple[str, Dict[str, Any]]]:
-    props = ensure_props(p)
-
-    cat = str(p.get("category", "") or "").strip()
-    unit_id = str(p.get("unit_id", "") or str(props.get("unit_id", "") or "")).strip()
-    name = str(p.get("name", "") or "").strip()
-
-    dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
-    material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
-    finish = props.get("finish", {}) if isinstance(props.get("finish"), dict) else {}
-
-    out: List[Tuple[str, Dict[str, Any]]] = []
-
-    # Always identity
-    identity: Dict[str, Any] = {
-        "Scope": scope,
-        "Kind": kind,
-        "UnitId": unit_id,
-        "ElementCode": props.get("element_code") or props.get("part_no") or props.get("bulk_code") or name,
-        "PartNo": props.get("part_no"),
-        "Category": cat,
-        "SourceGuid": props.get("source_guid"),
-    }
-    if kind == "Bulk":
-        identity["BulkCode"] = props.get("bulk_code") or name
-    out.append(("Pset_CWIdentity", identity))
-
-    if kind == "Bulk":
-        out.append(("Pset_Bulk", {
-            "BulkCode": props.get("bulk_code") or name,
-            "Quantity": props.get("quantity"),
-            "Area_m2": props.get("area_m2"),
-            "Length_m": props.get("length_m"),
-            "InstallLocation": props.get("install_location"),
-        }))
-        # optional appearance
-        out.append(("Pset_CWAppearance", {"ColorCode": props.get("color_code")}))
-        return out
-
-    # Part
-    out.append(("Pset_Part", {
-        "PartCode": props.get("part_no"),
-        "PartType": cat,
-        "ProfileCode": props.get("part_no"),
-        "Material": material.get("name") if isinstance(material, dict) else None,
-        "Finish": finish.get("type") if isinstance(finish, dict) else None,
-        "Length": dims.get("L") if isinstance(dims, dict) else None,
-    }))
-
-    out.append(("Pset_CWDimensions", {"Length_mm": dims.get("L"), "Width_mm": dims.get("W"), "Radius_mm": dims.get("R")}))
-    out.append(("Pset_CWMaterial", {"MaterialName": material.get("name") if isinstance(material, dict) else None}))
-    out.append(("Pset_CWSurfaceFinish", {
-        "FinishType": finish.get("type") if isinstance(finish, dict) else None,
-        "FinishThickness_um": finish.get("thickness_um") if isinstance(finish, dict) else None,
-    }))
-    out.append(("Pset_CWAppearance", {"ColorCode": props.get("color_code")}))
-
-    return out
-
 
 
 # ---------------------------------------------------------------------
