@@ -9,8 +9,8 @@ Constraints / intent
 --------------------
 - Do NOT modify existing utils modules (gh_utils, payload_utils, path_utils, etc.).
 - Keep all rules that were previously embedded in exporter in one place, so exporter stays small.
-- Provide robust compatibility:
-    * payload["unit_id"] or payload["props"]["unit_id"]
+- Enforce strict contract:
+    * UNIT payload MUST have top-level payload["unit_id"]
     * props["assembly_path"] supports:
         - list[dict] levels: {"name": "...", "key": "...", optional "role": "..."}
         - list[str] levels: "trimAssembly", "frameAssembly|frameRole"
@@ -30,29 +30,127 @@ from utils.payload_utils import unwrap_payload, normalize_payload_inplace, ensur
 # Payload collection / grouping
 # ---------------------------------------------------------------------
 
-def collect_payloads(MatData: Any) -> Tuple[List[Payload], int]:
+def _infer_scope_from_domain(domain: int) -> Optional[str]:
     """
-    Flatten MatData and return only valid payload dicts (normalized).
+    Infer scope from GH DataTree domain path.
+
+    Domain 0 → "UNIT"
+    Domain 1 → "NON_UNIT"
+    Domain 2 → None (require explicit scope for BULK)
+    """
+    if domain == 0:
+        return "UNIT"
+    elif domain == 1:
+        return "NON_UNIT"
+    else:
+        # Domain 2 (BULK) requires explicit scope
+        return None
+
+
+def collect_payloads(MatData: Any, *, log_fn: Any = None) -> Tuple[List[Payload], int]:
+    """
+    Collect payloads from MatData, preserving domain path information.
+
+    Priority for scope determination:
+    1. Explicit payload.props.scope (if valid)
+    2. Inferred from domain path (if DataTree)
+    3. Default to "UNIT" with warning
+
     Returns (payloads, ignored_non_payload_count).
     """
-    raw_items = list(iter_payloads(MatData))
+    from utils.gh_utils import is_tree_like, to_branch_dict_any
+
+    def log(msg: str) -> None:
+        if log_fn is not None:
+            log_fn(msg)
+
     payloads: List[Payload] = []
     bad = 0
 
-    for it in raw_items:
-        raw = unwrap_gh(it)
-        p = unwrap_payload(raw)
-        if p is None:
-            bad += 1
-            continue
+    # Check if input is a DataTree with domain paths
+    if is_tree_like(MatData):
+        branches, paths = to_branch_dict_any(MatData)
 
-        normalize_payload_inplace(
-            p,
-            default_schema=int(p.get("schema", 1) or 1),
-            default_category=str(p.get("category", "Unspecified") or "Unspecified"),
-        )
-        ensure_props(p)
-        payloads.append(p)
+        for path_str in paths:
+            # Parse domain from path (e.g., "{0;1}" → domain=0)
+            domain = 0
+            try:
+                if path_str.startswith("{") and ";" in path_str:
+                    domain = int(path_str[1:].split(";")[0])
+            except Exception:
+                domain = 0
+
+            inferred_scope = _infer_scope_from_domain(domain)
+
+            for item in branches.get(path_str, []):
+                raw = unwrap_gh(item)
+                p = unwrap_payload(raw)
+                if p is None:
+                    bad += 1
+                    continue
+
+                normalize_payload_inplace(
+                    p,
+                    default_schema=int(p.get("schema", 1) or 1),
+                    default_category=str(p.get("category", "Unspecified") or "Unspecified"),
+                )
+                props = ensure_props(p)
+
+                # Scope determination with priority
+                explicit_scope = props.get("scope")
+                if explicit_scope and str(explicit_scope).strip().upper() in ("UNIT", "NON_UNIT"):
+                    # Trust explicit scope
+                    final_scope = str(explicit_scope).strip().upper()
+                    final_scope = "NON_UNIT" if final_scope == "NON_UNIT" else "UNIT"
+
+                    # Warn if domain mismatch
+                    if inferred_scope and inferred_scope != final_scope:
+                        log(
+                            f"[WARN] Domain-scope mismatch: payload in {{{domain};...}} "
+                            f"but scope='{final_scope}'. Trusting explicit scope. "
+                            f"name={p.get('name','')!r}\n"
+                        )
+                elif inferred_scope:
+                    # Use inferred scope
+                    final_scope = inferred_scope
+                    props["scope"] = final_scope
+                else:
+                    # Domain 2+ requires explicit scope
+                    log(
+                        f"[WARN] Payload in domain {domain} missing explicit scope; "
+                        f"defaulting to 'UNIT'. name={p.get('name','')!r}\n"
+                    )
+                    final_scope = "UNIT"
+                    props["scope"] = final_scope
+
+                payloads.append(p)
+    else:
+        # Fallback: list input (no domain inference)
+        raw_items = list(iter_payloads(MatData))
+
+        for it in raw_items:
+            raw = unwrap_gh(it)
+            p = unwrap_payload(raw)
+            if p is None:
+                bad += 1
+                continue
+
+            normalize_payload_inplace(
+                p,
+                default_schema=int(p.get("schema", 1) or 1),
+                default_category=str(p.get("category", "Unspecified") or "Unspecified"),
+            )
+            props = ensure_props(p)
+
+            # No domain inference for list input
+            if not props.get("scope"):
+                log(
+                    f"[WARN] Flattened list input: payload missing scope; "
+                    f"defaulting to 'UNIT'. name={p.get('name','')!r}\n"
+                )
+                props["scope"] = "UNIT"
+
+            payloads.append(p)
 
     return payloads, bad
 
@@ -64,27 +162,45 @@ def get_scope(p: Payload) -> str:
     return "NON_UNIT" if s == "NON_UNIT" else "UNIT"
 
 
-def get_container_id(p: Payload) -> str:
+def get_container_id(p: Payload, *, log_fn: Any = None) -> str:
     """
-    For UNIT: prefer payload["unit_id"], fallback props["unit_id"].
-    For NON_UNIT: use props["container_id"] (default "DEFAULT").
+    Get container_id based on scope.
+
+    For UNIT: STRICT top-level payload["unit_id"] only.
+    For NON_UNIT: props.container_id OR default "__NON_UNIT__".
+
+    Returns container_id string.
+    Raises ValueError if UNIT payload missing unit_id.
     """
+    def log(msg: str) -> None:
+        if log_fn is not None:
+            log_fn(msg)
+
     props = ensure_props(p)
     scope = get_scope(p)
 
-    # --- Scheme A: single NON_UNIT container ---
     if scope == "NON_UNIT":
+        # Try props.container_id first
+        cid = props.get("container_id")
+        if cid is not None and str(cid).strip():
+            return str(cid).strip()
+
+        # Default to "__NON_UNIT__" with warning
+        log(
+            f"[WARN] NON_UNIT payload missing container_id; using default '__NON_UNIT__'. "
+            f"name={p.get('name','')!r}\n"
+        )
         return "__NON_UNIT__"
 
-    # --- UNIT behavior unchanged ---
+    # UNIT strict contract
     uid = p.get("unit_id", None)
     if uid is None or str(uid).strip() == "":
-        uid = props.get("unit_id", None)
-
-    if uid is None or str(uid).strip() == "":
-        raise ValueError("UNIT payload missing 'unit_id' (top-level or props['unit_id']).")
-
+        raise ValueError(
+            f"UNIT payload missing top-level 'unit_id'. (Strict spec; no props fallback) "
+            f"name={p.get('name','')!r}"
+        )
     return str(uid).strip()
+
 
 
 # ---------------------------------------------------------------------
@@ -119,7 +235,7 @@ def build_psets_for_payload(
     """
     props = ensure_props(p)
     cat = str(p.get("category", "Unspecified") or "Unspecified")
-    unit_id = str(p.get("unit_id", "") or props.get("unit_id", "") or "")
+    unit_id = str(p.get("unit_id", "") or "")
 
     dims = props.get("dims", {}) if isinstance(props.get("dims"), dict) else {}
     material = props.get("material", {}) if isinstance(props.get("material"), dict) else {}
@@ -197,11 +313,16 @@ def container_display_name(scope: str, cid: str) -> str:
 
 
 
-def group_by_container(payloads: List[Payload]) -> Dict[Tuple[str, str], List[Payload]]:
+def group_by_container(payloads: List[Payload], *, log_fn: Any = None) -> Dict[Tuple[str, str], List[Payload]]:
+    """
+    Group payloads by (scope, container_id).
+
+    Raises ValueError if any UNIT payload is missing unit_id.
+    """
     out: Dict[Tuple[str, str], List[Payload]] = {}
     for p in payloads:
         scope = get_scope(p)
-        cid = get_container_id(p)
+        cid = get_container_id(p, log_fn=log_fn)
         out.setdefault((scope, cid), []).append(p)
     return out
 
@@ -433,14 +554,31 @@ def bbox_center_key(geo: Any, *, decimals: int = 3) -> str:
 
 
 def get_unit_id_for_guid(p: Payload) -> str:
-    """Unit id used for GUID keying (payload['unit_id'] or props['unit_id'])."""
-    props = ensure_props(p)
+    """
+    Get unit/container key for GUID keying.
+
+    For UNIT: uses payload['unit_id'] (STRICT)
+    For NON_UNIT: uses container_id or "__NON_UNIT__"
+    """
+    scope = get_scope(p)
+
+    if scope == "NON_UNIT":
+        # Use container_id for NON_UNIT payloads
+        props = ensure_props(p)
+        cid = props.get("container_id")
+        if cid is not None and str(cid).strip():
+            return str(cid).strip()
+        return "__NON_UNIT__"
+
+    # UNIT strict contract
     uid = p.get("unit_id", None)
     if uid is None or str(uid).strip() == "":
-        uid = props.get("unit_id", None)
-    if uid is None or str(uid).strip() == "":
-        raise ValueError("GUID assignment requires unit_id (payload['unit_id'] or props['unit_id']).")
+        raise ValueError(
+            f"GUID assignment for UNIT payload requires top-level unit_id. "
+            f"name={p.get('name','')!r}"
+        )
     return str(uid).strip()
+
 
 
 def _load_json_dict(path: str) -> Dict[str, Any]:
@@ -559,8 +697,12 @@ def ensure_source_guid_from_json_inplace(
     """
     If props['source_guid'] is missing/empty, compute and assign stable guid.
 
-    Key rule:
-      storey_name -> (unit_key or __NON_UNIT__) -> part_name -> bbox_center
+    Key structure:
+      storey_name -> unit_key -> part_name -> bbox_center
+
+    Where unit_key is:
+      - UNIT: payload["unit_id"]
+      - NON_UNIT: props.container_id or "__NON_UNIT__"
     """
     props = ensure_props(p)
 
@@ -568,13 +710,11 @@ def ensure_source_guid_from_json_inplace(
     if isinstance(cur, str) and cur.strip():
         return cur.strip()
 
-    # --- unit_key ---
-    # Keep your current behavior: NON_UNIT uses "__NON_UNIT__"
-    # UNIT uses real unit_id
+    # Get unit/container key for GUID keying
     try:
-        unit_key = get_unit_id_for_guid(p)  # if your get_unit_id_for_guid already returns "__NON_UNIT__" for nonunit, keep it
+        unit_key = get_unit_id_for_guid(p)
     except Exception:
-        # extra safety: if any nonunit variant slips through without uid
+        # Fallback for safety (shouldn't happen with proper validation)
         unit_key = "__NON_UNIT__"
 
     part_name = str(p.get("name", "") or "").strip() or "Unnamed"

@@ -5,8 +5,8 @@ ifc_exporter.py
 This version keeps your existing utils untouched and only refactors exporter
 to use the new additive helper module: utils/exporter_utils.py
 
-Key compatibility:
-- payload["unit_id"] OR payload["props"]["unit_id"]
+Key contract:
+- UNIT payload MUST have top-level payload["unit_id"]
 - props["assembly_path"] supports list[dict] and list[str] ("name|role") formats
 - legacy props["assembly"] is supported
 """
@@ -128,13 +128,53 @@ def export_ifc_from_matdata(
         # Pset helper
         # ---------------------------------------------------------------------
         def add_pset(product: Any, pset_name: str, props: Dict[str, Any]) -> None:
+            """
+            Add or merge properties into a Pset.
+
+            If pset_name already exists on product, merge properties (new values override existing).
+            Otherwise create new Pset.
+            """
             if not props:
                 return
             clean = {k: v for k, v in props.items() if v is not None and v != ""}
             if not clean:
                 return
-            pset = ifc_run("pset.add_pset", model, product=product, name=pset_name)
-            ifc_run("pset.edit_pset", model, pset=pset, properties=clean)
+
+            # Check if Pset already exists on this product
+            existing_pset = None
+            if hasattr(product, 'IsDefinedBy') and product.IsDefinedBy:
+                for rel in product.IsDefinedBy:
+                    if hasattr(rel, 'RelatingPropertyDefinition'):
+                        pdef = rel.RelatingPropertyDefinition
+                        if hasattr(pdef, 'Name') and pdef.Name == pset_name:
+                            existing_pset = pdef
+                            break
+
+            if existing_pset:
+                # Merge: get existing properties, update with new ones
+                existing_props = {}
+                if hasattr(existing_pset, 'HasProperties') and existing_pset.HasProperties:
+                    for prop in existing_pset.HasProperties:
+                        if hasattr(prop, 'Name') and hasattr(prop, 'NominalValue'):
+                            prop_name = prop.Name
+                            # Extract value from IfcPropertySingleValue
+                            if hasattr(prop.NominalValue, 'wrappedValue'):
+                                existing_props[prop_name] = prop.NominalValue.wrappedValue
+                            else:
+                                # Fallback: use NominalValue directly
+                                existing_props[prop_name] = prop.NominalValue
+
+                # Merge: new properties override existing (allowing user overrides to take precedence)
+                merged = {**existing_props, **clean}
+                log_add(
+                    f"[DEBUG] Merging Pset '{pset_name}' on {getattr(product, 'Name', 'Unknown')}: "
+                    f"existing={list(existing_props.keys())}, new={list(clean.keys())}, merged={list(merged.keys())}\n"
+                )
+                ifc_run("pset.edit_pset", model, pset=existing_pset, properties=merged)
+            else:
+                # Create new Pset
+                pset = ifc_run("pset.add_pset", model, product=product, name=pset_name)
+                ifc_run("pset.edit_pset", model, pset=pset, properties=clean)
 
         # ---------------------------------------------------------------------
         # Geometry helpers (keep local: exporter policy, not util)
@@ -266,7 +306,7 @@ def export_ifc_from_matdata(
         # ---------------------------------------------------------------------
         # Payloads: collect + group by container
         # ---------------------------------------------------------------------
-        payloads, bad = collect_payloads(MatData)
+        payloads, bad = collect_payloads(MatData, log_fn=log_add)
         if not payloads:
             raise ValueError(f"MatData is empty (no payloads). ignored_non_payload={bad}")
 
@@ -274,13 +314,37 @@ def export_ifc_from_matdata(
         # Stable source_guid assignment (JSON-backed)
         # - Builder may output props['source_guid']=None.
         # - We key by (unit_id, part name, bbox center) and persist to guid_file.json.
+        # - Skip AssemblyMeta payloads (no geometry, no GUID needed)
         # -----------------------------------------------------------------
         guid_json_path = resolve_guid_json_path(ResolvedOutPath)
         with locked_guid_db(guid_json_path) as guid_db:
             for p in payloads:
+                # Skip GUID assignment for AssemblyMeta (category-based check)
+                cat = str(p.get("category", "") or "").strip()
+                if cat == "__ASSEMBLY_META__":
+                    continue
                 ensure_source_guid_from_json_inplace(p, guid_db, storey_name=storey_name_str, decimals=3)
 
-        containers = group_by_container(payloads)
+        # DEBUG: Category statistics
+        from collections import Counter
+        cat_counts = Counter(str(p.get("category", "")).strip() for p in payloads)
+        log_add(f"[DEBUG] Category counts: {dict(cat_counts)}\n")
+        assembly_meta_count = cat_counts.get("__ASSEMBLY_META__", 0)
+        if assembly_meta_count > 0:
+            log_add(f"[DEBUG] Found {assembly_meta_count} AssemblyMeta payloads\n")
+            # Sample first AssemblyMeta
+            for p in payloads:
+                if str(p.get("category", "")).strip() == "__ASSEMBLY_META__":
+                    props_sample = p.get("props", {})
+                    log_add(
+                        f"[DEBUG] Sample AssemblyMeta: name={p.get('name','')!r} "
+                        f"unit_id={p.get('unit_id','')!r} geo={p.get('geo')} "
+                        f"pset_overrides={props_sample.get('pset_overrides',{})!r} "
+                        f"assembly_path={props_sample.get('assembly_path',[])!r}\n"
+                    )
+                    break
+
+        containers = group_by_container(payloads, log_fn=log_add)
 
         Log += f"ifcopenshell version: {getattr(ifcopenshell, 'version', 'unknown')}\n"
         Log += f"Resolved OutPath: {ResolvedOutPath}\n"
@@ -330,12 +394,22 @@ def export_ifc_from_matdata(
                 except Exception:
                     props = {}
 
-                cat = str(pl.get("category", "") or "").strip()
-                is_meta = (cat == "__ASSEMBLY_META__") or (pl.get("geo", "__HAS_GEO__") is None)
 
+                cat = str(pl.get("category", "") or "").strip()
                 apath = parse_assembly_path(pl)
 
-                if is_meta:
+                # STRICT: only category == "__ASSEMBLY_META__" is AssemblyMeta
+                is_assembly_meta = (cat == "__ASSEMBLY_META__")
+
+                # ---- AssemblyMeta payloads (no geometry): write psets to the assembly node ----
+                if is_assembly_meta:
+                    # Spec: geo MUST be None. If not, ignore geometry and warn.
+                    if pl.get("geo", None) is not None:
+                        log_add(
+                            f"[WARN] AssemblyMeta payload has geo!=None; ignoring geo. "
+                            f"name={pl.get('name','')!r} cat={cat!r}\n"
+                        )
+
                     if apath:
                         deepest = ensure_assembly_chain(
                             ifc_run=ifc_run,
@@ -348,14 +422,37 @@ def export_ifc_from_matdata(
                             add_pset=add_pset,
                         )
                         overrides = props.get("pset_overrides")
+                        log_add(
+                            f"[DEBUG] AssemblyMeta: name={pl.get('name','')!r} apath={apath} "
+                            f"overrides={overrides!r}\n"
+                        )
                         if isinstance(overrides, dict):
                             for pset_name, kv in overrides.items():
                                 if not isinstance(pset_name, str) or not pset_name.strip():
                                     continue
                                 if not isinstance(kv, dict):
                                     continue
+                                log_add(
+                                    f"[DEBUG] Calling add_pset on {getattr(deepest, 'Name', 'Unknown')}: "
+                                    f"pset_name={pset_name!r} kv={kv!r}\n"
+                                )
                                 add_pset(deepest, pset_name.strip(), kv)
                         grouped += 1
+                    else:
+                        # No assembly_path means nowhere to apply; warn and skip.
+                        log_add(
+                            f"[WARN] AssemblyMeta payload missing assembly_path; skipped. "
+                            f"name={pl.get('name','')!r} cat={cat!r}\n"
+                        )
+                    continue
+
+                # ---- Normal payloads: geo is required to create an IFC element ----
+                if pl.get("geo", None) is None:
+                    # This is NOT AssemblyMeta (category differs), so treat as data error and skip.
+                    log_add(
+                        f"[WARN] Non-AssemblyMeta payload has geo=None; skipped. "
+                        f"name={pl.get('name','')!r} cat={cat!r}\n"
+                    )
                     continue
 
                 # -----------------------------------------------------------------
