@@ -361,7 +361,20 @@ def export_ifc_from_matdata(
         created_assembly_nodes = 0
 
         for (scope, cid), items in containers.items():
-            cname = container_display_name(scope, cid)
+            # Derive container name from outermost assembly_path level if available.
+            # This allows ifc_assembly to control the top-level name (e.g. per-unit names).
+            # Fallback to auto-generated name (e.g. "Unit_XXX") if no assembly_path.
+            first_apath = None
+            for _pl in items:
+                _ap = parse_assembly_path(_pl)
+                if _ap:
+                    first_apath = _ap
+                    break
+
+            if first_apath:
+                cname = first_apath[0].get("name", container_display_name(scope, cid))
+            else:
+                cname = container_display_name(scope, cid)
 
             container = ifc_run("root.create_entity", model, ifc_class="IfcElementAssembly", name=cname)
             created_containers += 1
@@ -411,20 +424,29 @@ def export_ifc_from_matdata(
                         )
 
                     if apath:
-                        deepest = ensure_assembly_chain(
-                            ifc_run=ifc_run,
-                            model=model,
-                            container_elem=container,
-                            scope=scope,
-                            container_id=cid,
-                            assembly_path=apath,
-                            node_cache=node_cache,
-                            add_pset=add_pset,
-                        )
+                        # Strip outermost level (already used as container name).
+                        # Inner levels form the sub-assembly chain under the container.
+                        inner_apath = apath[1:]
+
+                        if inner_apath:
+                            deepest = ensure_assembly_chain(
+                                ifc_run=ifc_run,
+                                model=model,
+                                container_elem=container,
+                                scope=scope,
+                                container_id=cid,
+                                assembly_path=inner_apath,
+                                node_cache=node_cache,
+                                add_pset=add_pset,
+                            )
+                        else:
+                            # Only outermost level existed -> overrides apply to container itself
+                            deepest = container
+
                         overrides = props.get("pset_overrides")
                         log_add(
                             f"[DEBUG] AssemblyMeta: name={pl.get('name','')!r} apath={apath} "
-                            f"overrides={overrides!r}\n"
+                            f"inner_apath={inner_apath} overrides={overrides!r}\n"
                         )
                         if isinstance(overrides, dict):
                             for pset_name, kv in overrides.items():
@@ -462,17 +484,24 @@ def export_ifc_from_matdata(
                 created_elements += 1
 
                 if apath:
-                    deepest = ensure_assembly_chain(
-                        ifc_run=ifc_run,
-                        model=model,
-                        container_elem=container,
-                        scope=scope,
-                        container_id=cid,
-                        assembly_path=apath,
-                        node_cache=node_cache,
-                        add_pset=add_pset,
-                    )
-                    ifc_run("aggregate.assign_object", model, products=[elem], relating_object=deepest)
+                    # Strip outermost level (already used as container name).
+                    inner_apath = apath[1:]
+
+                    if inner_apath:
+                        deepest = ensure_assembly_chain(
+                            ifc_run=ifc_run,
+                            model=model,
+                            container_elem=container,
+                            scope=scope,
+                            container_id=cid,
+                            assembly_path=inner_apath,
+                            node_cache=node_cache,
+                            add_pset=add_pset,
+                        )
+                        ifc_run("aggregate.assign_object", model, products=[elem], relating_object=deepest)
+                    else:
+                        # Only outermost level -> element goes directly under container
+                        ifc_run("aggregate.assign_object", model, products=[elem], relating_object=container)
                     grouped += 1
                 else:
                     ifc_run("aggregate.assign_object", model, products=[elem], relating_object=container)

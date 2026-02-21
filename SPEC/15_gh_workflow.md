@@ -79,9 +79,9 @@ MatData MUST be a Grasshopper DataTree with domain-based paths to separate diffe
   - Shared/common elements not belonging to specific units
   - Example: `{1;0}`, `{1;1}`, etc.
 
-- **Domain 2**: `{2;...}` - BULK branches (future)
-  - Bulk/mass elements
-  - Not yet implemented in current workflow
+Bulk payloads (`kind=Bulk`) are NOT a separate domain.
+They flow through Domain 0 or Domain 1 depending on their scope,
+and are merged via Entwine alongside other payloads.
 
 ## Scope Determination Priority
 
@@ -91,7 +91,6 @@ When routing payloads, use this priority order:
 2. **Second**: Infer from domain path if scope is missing
    - Domain 0 → scope = "UNIT"
    - Domain 1 → scope = "NON_UNIT"
-   - Domain 2 → scope = "NON_UNIT" (BULK is a special case)
 3. **Fallback**: Default to "UNIT" with warning if cannot determine
 
 ## General Rules
@@ -247,6 +246,8 @@ Used for:
 
 Obj [any][tree access]
 Category [str][item access]
+Scope [str][item access]  ("UNIT" or "NON_UNIT")
+UnitId [str][tree access]  (required when Scope == "UNIT")
 
 ### Output
 
@@ -258,10 +259,15 @@ Log
 Creates payload:
 
 ```
-scope = NON_UNIT
+scope = from Scope input
 kind = Bulk
-geo may be None
 ```
+
+Bulk payloads follow the same pipeline as Part payloads:
+- Scope "UNIT": output as DataTree, requires UnitId, flows into Domain 0 via Entwine
+- Scope "NON_UNIT": output as list, flows into Domain 1 via Entwine
+- Overrides: use ifc_override.py upstream (3rd slot in GH wrapper)
+- Assembly: use ifc_assembly.py downstream (same as Part payloads)
 
 ---
 
@@ -278,7 +284,7 @@ Supports multi-level nesting via chaining.
 ### Input
 
 MatData [any][tree access]
-Name [str][item access]
+Name [str][tree access]  (backward compatible: single string broadcasts to all branches)
 KeySuffix [str][item access]
 Role [str][item access]
 Key [str][tree access]
@@ -389,13 +395,8 @@ Exporter input MUST be a DataTree with domain paths:
   - If missing, exporter assigns default `"__NON_UNIT__"`
   - MUST NOT be grouped into UNIT containers
 
-- **Domain 2** `{2;...}`: BULK payloads
-  - `props.kind` SHOULD be `"Bulk"`
-  - `props.scope` MUST be either `"UNIT"` or `"NON_UNIT"`
-    - If `scope="UNIT"` → MUST have top-level `payload["unit_id"]`
-    - If `scope="NON_UNIT"` → MUST have `container_id` or fallback `"__NON_UNIT__"`
-  - BULK domain is semantic grouping only
-  - Container grouping still determined strictly by `(scope, unit_id/container_id)`
+Bulk payloads (`kind=Bulk`) are merged into Domain 0 or Domain 1
+depending on their scope. No separate domain needed.
 
 **DO NOT flatten** the DataTree before exporter.
 Domain separation preserves authoring structure and prevents cross-contamination.
@@ -404,11 +405,8 @@ Exporter may internally flatten after reading domain structure.
 
 ### Mixed Input Support
 
-A single MatData may contain mixed domains:
-
-- UNIT
-- NON_UNIT
-- BULK
+A single MatData may contain mixed domains (Domain 0 + Domain 1).
+Both Part and Bulk payloads coexist within the same domains.
 
 Exporter routing rules:
 
@@ -431,12 +429,7 @@ Exporter MUST validate and log:
    - MUST have `scope="NON_UNIT"`
    - Missing container_id → auto-assign `"__NON_UNIT__"` + WARNING
 
-3. BULK payloads
-   - MUST have valid `scope`
-   - If `scope="UNIT"` but no `unit_id` → ERROR
-   - If `scope="NON_UNIT"` but no container_id → assign default + WARNING
-
-4. Domain mismatch
+3. Domain mismatch
    Example:
    - payload in `{0}` but scope="NON_UNIT"
 

@@ -262,6 +262,34 @@ def _validate_unitid_against_paths(obj_paths: List[str], uid_bd: Dict[str, List[
     return True, ""
 
 
+def _resolve_name_for_branch(
+    name_bd: Dict[str, List[Any]],
+    branch_path: str,
+) -> str:
+    """Resolve Name for a specific branch.
+
+    Resolution:
+      1. If name_bd has a branch matching branch_path, use its first item.
+      2. Else if name_bd has exactly one non-empty branch (item access /
+         broadcast), use that value for all branches.
+      3. Otherwise return "" (no name for this branch).
+    """
+    if branch_path in name_bd:
+        items = name_bd[branch_path]
+        if items:
+            return str(unwrap_gh(items[0]) or "").strip()
+        return ""
+
+    non_empty = [p for p, it in name_bd.items() if it]
+    if len(non_empty) == 1:
+        items = name_bd[non_empty[0]]
+        if items:
+            return str(unwrap_gh(items[0]) or "").strip()
+        return ""
+
+    return ""
+
+
 def _tiny_dummy_mesh() -> Any:
     """Create a minimal 1-triangle Rhino Mesh as a placeholder geometry.
 
@@ -365,8 +393,10 @@ def annotate_subassembly(
     ----------
     MatData : GH DataTree or list
         Input payloads organised by unit branches.
-    Name : str
-        Assembly level name (e.g. "Panel_A").
+    Name : str or GH DataTree
+        Assembly level name.  Accepts either a single string (broadcast to
+        all branches — backward compatible with item access) or a DataTree
+        with per-branch strings (tree access).
     KeySuffix : str, optional
         Appended to Name to form the identity key ("Name|Suffix").
         Useful when the same Name appears in different roles.
@@ -397,9 +427,13 @@ def annotate_subassembly(
     """
     print(f"[{BUILD_STAMP}]")
 
-    # ── 0. Parse scalar inputs ──────────────────────────────────────────
-    sub_name = str(Name).strip() if Name is not None else ""
-    if not sub_name:
+    # ── 0. Parse inputs ───────────────────────────────────────────────────
+    # Name supports both item access (single str, broadcast to all branches)
+    # and tree access (per-branch strings via DataTree).
+    name_bd, _ = to_branch_dict_any(Name)
+    _name_non_empty = [p for p, it in name_bd.items()
+                       if it and str(unwrap_gh(it[0]) or "").strip()]
+    if not _name_non_empty:
         return MatData, "assembly: empty Name -> no changes."
 
     key_suffix = None
@@ -441,6 +475,17 @@ def annotate_subassembly(
         if not branch:
             if out_tree is None:
                 out_list.append([])
+            continue
+
+        # 4-pre. Resolve Name for this branch (supports per-branch tree access)
+        sub_name = _resolve_name_for_branch(name_bd, p)
+        if not sub_name:
+            # No name for this branch -> pass through unmodified
+            if out_tree is not None:
+                _add_items_to_tree(out_tree, p, list(branch))
+            else:
+                out_list.append(list(branch))
+            logs.append(f"{p}: skipped (no Name for this branch)")
             continue
 
         # 4a. Infer unit_id / scope / schema from the first payload in branch

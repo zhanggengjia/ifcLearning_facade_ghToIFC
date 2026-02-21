@@ -78,9 +78,8 @@ MatData SHOULD be a Grasshopper DataTree with domain-based organization:
   - `props.scope` MUST be "NON_UNIT"
   - Container grouping uses `container_id` or defaults to `"__NON_UNIT__"`
 
-- **Domain 2** `{2;...}`: BULK payloads
-  - `props.scope` MUST be explicitly set ("UNIT" or "NON_UNIT")
-  - Container grouping follows scope rules
+Bulk payloads (`kind=Bulk`) are merged into Domain 0 or Domain 1
+depending on their scope. No separate domain needed.
 
 ## Scope Determination (Priority Order)
 
@@ -90,7 +89,6 @@ When routing payloads to containers:
 2. **Inferred from domain**:
    - Domain 0 → "UNIT"
    - Domain 1 → "NON_UNIT"
-   - Domain 2 → require explicit scope (no default)
 3. **Fallback**: Default to "UNIT" with WARNING
 
 Exporter MUST trust explicit `props.scope` over domain path.

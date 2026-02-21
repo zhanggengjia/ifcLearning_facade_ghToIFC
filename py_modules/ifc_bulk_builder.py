@@ -1,21 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-ifc_bulk_builder_fixed.py
-Bulk builder (scope: UNIT/NON_UNIT, kind: Bulk)
+ifc_bulk_builder.py
+Bulk builder (kind: Bulk)
+
+Scope is determined by the Scope input:
+  - "UNIT"     -> requires UnitId, output mirrors Obj tree shape
+  - "NON_UNIT" -> UnitId not needed, output as flat list
+
+Overrides are NOT handled here. Use ifc_override.py upstream to inject
+override data into the 3rd slot of the GH wrapper [geo, name, override_data].
 
 GH leaf convention:
-  Obj(Tree): leaf = [geo, raw_name]
-  - raw_name = bulk_code (optionally "CODE_guid"; guid will be ignored here)
+  Obj: leaf = [geo, raw_name] or [geo, raw_name, override_data]
+  - raw_name = bulk_code (optionally "CODE_guid"; guid portion is stripped)
 
 Inputs:
-  Obj(Tree)
+  Obj(Tree/List)  : GH wrapper objects
   Category(Tree)  : optional (empty -> default_category)
-  Scope(Item)     : "UNIT" or "NON_UNIT" (empty -> default_scope)
-  UnitId(Tree)    : required only if scope == UNIT
+  Scope(Item)     : "UNIT" or "NON_UNIT"
+  UnitId(Tree)    : required when Scope == "UNIT"
   SchemaVersion   : int
 
 Outputs:
-  MatData : List[List[GH_ObjectWrapper(payload)]]
+  MatData : DataTree or List (mirrors Obj shape when UNIT)
   Log     : str
 """
 
@@ -25,7 +32,10 @@ from typing import Any, Dict, List, Tuple
 from ifc_types import AnyInput, Payload, PathStr
 from ifc_class_map import resolve_ifc_class_hint
 
-from utils.gh_utils import to_branch_dict_any, get_branch, wrap_gh, unwrap_gh, is_datatree_like, new_datatree, add_to_datatree
+from utils.gh_utils import (
+    to_branch_dict_any, get_branch, wrap_gh, unwrap_gh,
+    is_datatree_like, new_datatree, add_to_datatree,
+)
 from utils.payload_utils import normalize_payload_inplace
 from utils.override_utils import apply_overrides_to_props
 
@@ -33,25 +43,40 @@ from utils.override_utils import apply_overrides_to_props
 def build_bulk_matdata(
     Obj: AnyInput,
     Category: AnyInput,
-    Scope: Any,
-    UnitId: AnyInput,
-    Overrides: Any = None,
+    Scope: Any = None,
+    UnitId: AnyInput = None,
     SchemaVersion: int = 1,
     default_category: str = "Unspecified",
-    default_scope: str = "NON_UNIT",
-) -> Tuple[List[List[Any]], str]:
+) -> Tuple[Any, str]:
+    """
+    Build MatData payloads for Bulk items.
+
+    Scope is determined by the Scope input:
+      - "UNIT"     -> UnitId is required, output as DataTree
+      - "NON_UNIT" -> UnitId not needed, output as list
+    """
     ObjD, ObjP = to_branch_dict_any(Obj)
-    CatD, CatP = to_branch_dict_any(Category)
-    UidD, UidP = to_branch_dict_any(UnitId)
+    CatD, _ = to_branch_dict_any(Category)
 
+    # Scope from explicit input
     scope_raw = str(unwrap_gh(Scope) or "").strip().upper()
-    scope = scope_raw if scope_raw in ("UNIT", "NON_UNIT") else str(default_scope).strip().upper()
-    if scope not in ("UNIT", "NON_UNIT"):
-        scope = "NON_UNIT"
+    scope = scope_raw if scope_raw in ("UNIT", "NON_UNIT") else "NON_UNIT"
+    is_unit = (scope == "UNIT")
 
-    all_paths: List[PathStr] = sorted(set(ObjP) | set(CatP) | set(UidP))
-    out: List[List[Any]] = []
+    # UnitId parsing (only needed for UNIT scope)
+    UidD: Dict[str, List[Any]] = {}
+    if is_unit:
+        if UnitId is None:
+            raise Exception("bulk_builder: Scope=UNIT but UnitId is not provided.")
+        UidD, _ = to_branch_dict_any(UnitId)
+
+    # Output mirrors Obj shape (DataTree in -> DataTree out)
+    want_tree = is_datatree_like(Obj)
+    out_tree = new_datatree() if want_tree else None
+    out_list: List[List[Any]] = []
     logs: List[str] = []
+
+    all_paths: List[PathStr] = list(ObjP)
 
     for p in all_paths:
         objs = get_branch(ObjD, p, allow_fallback=False)
@@ -61,11 +86,12 @@ def build_bulk_matdata(
         if not cat_value:
             cat_value = default_category
 
+        # Resolve unit_id
         unit_id = "__NON_UNIT__"
-        if scope == "UNIT":
+        if is_unit:
             u_branch = get_branch(UidD, p, allow_fallback=True)
             if not u_branch:
-                raise Exception(f"[{p}] bulk scope=UNIT requires UnitId (missing branch and no fallback {{0}}).")
+                raise Exception(f"[{p}] bulk scope=UNIT requires UnitId (missing branch and no fallback).")
             unit_id = str(unwrap_gh(u_branch[0]) or "").strip()
             if not unit_id:
                 raise Exception(f"[{p}] bulk scope=UNIT: UnitId is empty after unwrap/strip.")
@@ -106,7 +132,7 @@ def build_bulk_matdata(
                 # exporter assigns stable guid later
                 "source_guid": None,
 
-                # optional bulk metrics (fill later if you want)
+                # optional bulk metrics (fill via override if needed)
                 "quantity": None,
                 "area_m2": None,
                 "length_m": None,
@@ -118,9 +144,9 @@ def build_bulk_matdata(
                 "unit_id": unit_id,
             }
 
-
-            # User-defined Pset overrides (from GH)
-            apply_overrides_to_props(props, Overrides, unit_id=unit_id)
+            # Override from 3rd slot (injected by ifc_override.py upstream)
+            if len(pair) >= 3:
+                apply_overrides_to_props(props, pair[2])
 
             payload: Payload = {
                 "schema": int(SchemaVersion),
