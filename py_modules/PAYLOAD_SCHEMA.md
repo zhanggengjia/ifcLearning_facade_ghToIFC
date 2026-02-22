@@ -35,6 +35,7 @@ Allowed values:
 
 - "UNIT"
 - "NON_UNIT"
+- "CONTEXT"
 
 Meaning:
 
@@ -44,6 +45,12 @@ UNIT
 NON_UNIT
 → belongs to loose/non-unit container
 (trim, loose ceiling, loose metal etc)
+
+CONTEXT
+→ belongs to a structural reference container
+(beams, slabs, steel, embedded parts)
+→ forced by GH Domain 2 path (overrides props.scope)
+→ reference-only; not a fabrication assembly
 
 ⚠ scope MUST NOT describe element type (bulk/part)
 
@@ -74,7 +81,7 @@ Bulk
 
 Required or commonly present:
 
-props.scope : "UNIT" | "NON_UNIT"
+props.scope : "UNIT" | "NON_UNIT" | "CONTEXT"
 props.kind : "Part" | "Bulk"
 props.source_guid : stable guid (assigned in exporter)
 props.element_code : unified identity code (part_no or bulk_code)
@@ -143,7 +150,7 @@ Example:
 Stable GUID is determined by:
 
 storey_name +
-unit_id or "**NON_UNIT**" +
+unit_id or `__NON_UNIT__` +
 element_code +
 bbox_center
 
@@ -167,8 +174,9 @@ Mapping:
 Kind=Part → Pset_Part
 Kind=Bulk → Pset_Bulk
 
-Scope=UNIT → Unit container
-Scope=NON_UNIT → NonUnit container
+Scope=UNIT → Unit container (Pset_Unit)
+Scope=NON_UNIT → NonUnit container (Pset_NonUnit)
+Scope=CONTEXT → Context container (Pset_Context)
 
 ---
 
