@@ -19,7 +19,13 @@ KEY CONCEPTS
 2. **assembly_path** (props['assembly_path'])
    A list[dict] that records the nesting chain of assembly levels.
    Each dict has: {name, key, role?}.
-   The list is ordered from innermost (index 0) to outermost.
+   The list is ordered from OUTERMOST (index 0) to innermost (last index).
+   Because _stable_wrap_outer PREPENDS, the most recently applied assembly
+   always ends up at index 0.  The exporter uses index 0 as the IFC container.
+
+   GH wiring rule: apply the SUB-ASSEMBLY component FIRST, then the MAIN
+   (container-level) assembly LAST — it will land at index 0 and become
+   the IFC container.
 
 3. **Stable outer wrap rule**
    When a subassembly is applied, its node is PREPENDED to the existing
@@ -128,6 +134,12 @@ def _stable_wrap_outer(path: Any, node: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     This guarantees idempotent wrapping: applying the same subassembly
     twice produces the same assembly_path as applying it once.
+
+    ORDERING RULE:
+      - PREPEND means the most recently applied assembly lands at index 0.
+      - index 0 = outermost (IFC container level).
+      - last index = innermost (deepest sub-assembly, closest to elements).
+      - Therefore: apply sub-assemblies FIRST, main/container assembly LAST.
     """
     if not isinstance(path, list):
         path = []

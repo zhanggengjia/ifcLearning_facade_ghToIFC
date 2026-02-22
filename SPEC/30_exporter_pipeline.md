@@ -38,6 +38,16 @@ Define how MatData payloads become an IFC4 file.
   - If payload has assembly_path: create nested assembly chain (IfcElementAssembly nodes)
   - Else: aggregate directly under container
 
+## Container Psets
+
+All container types use `ContainerCode` as the identifier key (consistent for downstream querying).
+
+| Scope | Pset name | Keys |
+|---|---|---|
+| UNIT | `Pset_Unit` | `ContainerCode`, `BayNo`, `Level`, `InstallSequence` |
+| NON_UNIT | `Pset_NonUnit` | `ContainerCode` |
+| CONTEXT | `Pset_Context` | `ContainerCode` |
+
 # AssemblyMeta handling (STRICT)
 
 A payload is treated as AssemblyMeta if:
@@ -78,6 +88,12 @@ MatData SHOULD be a Grasshopper DataTree with domain-based organization:
   - `props.scope` MUST be "NON_UNIT"
   - Container grouping uses `container_id` or defaults to `"__NON_UNIT__"`
 
+- **Domain 2** `{2;...}`: CONTEXT payloads (structural reference objects: beams, slabs, steel)
+  - Domain path is **authoritative**: always forces `scope = "CONTEXT"`, overriding any `props.scope`
+  - Goes into a separate "CONTEXT" container (IfcElementAssembly) under the storey
+  - Container pset: `Pset_Context` → `ContainerCode`
+  - All other pipeline rules (assembly_path, pset_overrides, etc.) apply normally
+
 Bulk payloads (`kind=Bulk`) are merged into Domain 0 or Domain 1
 depending on their scope. No separate domain needed.
 
@@ -85,11 +101,12 @@ depending on their scope. No separate domain needed.
 
 When routing payloads to containers:
 
-1. **Explicit scope**: Use `payload.props.scope` if present and valid
-2. **Inferred from domain**:
+1. **Domain 2 → "CONTEXT"** (always authoritative, overrides `props.scope`)
+2. **Explicit scope**: Use `payload.props.scope` if present and valid (Domains 0/1)
+3. **Inferred from domain**:
    - Domain 0 → "UNIT"
    - Domain 1 → "NON_UNIT"
-3. **Fallback**: Default to "UNIT" with WARNING
+4. **Fallback**: Default to "UNIT" with WARNING
 
 Exporter MUST trust explicit `props.scope` over domain path.
 

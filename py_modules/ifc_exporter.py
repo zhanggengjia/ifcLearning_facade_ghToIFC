@@ -382,13 +382,15 @@ def export_ifc_from_matdata(
             # container pset
             if scope == "UNIT":
                 add_pset(container, "Pset_Unit", {
-                    "UnitCode": cid,
+                    "ContainerCode": cid,
                     "BayNo": None,
                     "Level": None,
                     "InstallSequence": None,
                 })
+            elif scope == "CONTEXT":
+                add_pset(container, "Pset_Context", {"ContainerCode": cid})
             else:
-                add_pset(container, "Pset_NonUnit", {"GroupCode": cid, "Scope": scope})
+                add_pset(container, "Pset_NonUnit", {"ContainerCode": cid})
 
             ifc_run("spatial.assign_container", model, products=[container], relating_structure=storey)
 

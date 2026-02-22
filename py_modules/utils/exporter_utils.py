@@ -36,14 +36,15 @@ def _infer_scope_from_domain(domain: int) -> Optional[str]:
 
     Domain 0 → "UNIT"
     Domain 1 → "NON_UNIT"
-    Domain 2 → None (require explicit scope for BULK)
+    Domain 2 → "CONTEXT" (context reference objects: beams, slabs, structural refs)
     """
     if domain == 0:
         return "UNIT"
     elif domain == 1:
         return "NON_UNIT"
+    elif domain == 2:
+        return "CONTEXT"
     else:
-        # Domain 2 (BULK) requires explicit scope
         return None
 
 
@@ -96,32 +97,38 @@ def collect_payloads(MatData: Any, *, log_fn: Any = None) -> Tuple[List[Payload]
                 )
                 props = ensure_props(p)
 
-                # Scope determination with priority
-                explicit_scope = props.get("scope")
-                if explicit_scope and str(explicit_scope).strip().upper() in ("UNIT", "NON_UNIT"):
-                    # Trust explicit scope
-                    final_scope = str(explicit_scope).strip().upper()
-                    final_scope = "NON_UNIT" if final_scope == "NON_UNIT" else "UNIT"
-
-                    # Warn if domain mismatch
-                    if inferred_scope and inferred_scope != final_scope:
-                        log(
-                            f"[WARN] Domain-scope mismatch: payload in {{{domain};...}} "
-                            f"but scope='{final_scope}'. Trusting explicit scope. "
-                            f"name={p.get('name','')!r}\n"
-                        )
-                elif inferred_scope:
-                    # Use inferred scope
-                    final_scope = inferred_scope
+                # Scope determination with priority.
+                # Domain 2 (CONTEXT) is authoritative: always overrides props.scope.
+                # This is necessary because nonUnit builder writes scope="NON_UNIT",
+                # but Entwine into {2;...} marks these as context reference objects.
+                if inferred_scope == "CONTEXT":
+                    final_scope = "CONTEXT"
                     props["scope"] = final_scope
                 else:
-                    # Domain 2+ requires explicit scope
-                    log(
-                        f"[WARN] Payload in domain {domain} missing explicit scope; "
-                        f"defaulting to 'UNIT'. name={p.get('name','')!r}\n"
-                    )
-                    final_scope = "UNIT"
-                    props["scope"] = final_scope
+                    explicit_scope = props.get("scope")
+                    if explicit_scope and str(explicit_scope).strip().upper() in ("UNIT", "NON_UNIT"):
+                        # Trust explicit scope
+                        final_scope = str(explicit_scope).strip().upper()
+                        final_scope = "NON_UNIT" if final_scope == "NON_UNIT" else "UNIT"
+
+                        # Warn if domain mismatch
+                        if inferred_scope and inferred_scope != final_scope:
+                            log(
+                                f"[WARN] Domain-scope mismatch: payload in {{{domain};...}} "
+                                f"but scope='{final_scope}'. Trusting explicit scope. "
+                                f"name={p.get('name','')!r}\n"
+                            )
+                    elif inferred_scope:
+                        # Use inferred scope
+                        final_scope = inferred_scope
+                        props["scope"] = final_scope
+                    else:
+                        log(
+                            f"[WARN] Payload in domain {domain} missing explicit scope; "
+                            f"defaulting to 'UNIT'. name={p.get('name','')!r}\n"
+                        )
+                        final_scope = "UNIT"
+                        props["scope"] = final_scope
 
                 payloads.append(p)
     else:
@@ -159,7 +166,11 @@ def get_scope(p: Payload) -> str:
     props = ensure_props(p)
     scope = props.get("scope", "UNIT")
     s = str(scope).strip().upper() if scope is not None else "UNIT"
-    return "NON_UNIT" if s == "NON_UNIT" else "UNIT"
+    if s == "NON_UNIT":
+        return "NON_UNIT"
+    if s == "CONTEXT":
+        return "CONTEXT"
+    return "UNIT"
 
 
 def get_container_id(p: Payload, *, log_fn: Any = None) -> str:
@@ -168,6 +179,7 @@ def get_container_id(p: Payload, *, log_fn: Any = None) -> str:
 
     For UNIT: STRICT top-level payload["unit_id"] only.
     For NON_UNIT: props.container_id OR default "__NON_UNIT__".
+    For CONTEXT: props.container_id OR default "__CONTEXT__".
 
     Returns container_id string.
     Raises ValueError if UNIT payload missing unit_id.
@@ -180,17 +192,20 @@ def get_container_id(p: Payload, *, log_fn: Any = None) -> str:
     scope = get_scope(p)
 
     if scope == "NON_UNIT":
-        # Try props.container_id first
         cid = props.get("container_id")
         if cid is not None and str(cid).strip():
             return str(cid).strip()
-
-        # Default to "__NON_UNIT__" with warning
         log(
             f"[WARN] NON_UNIT payload missing container_id; using default '__NON_UNIT__'. "
             f"name={p.get('name','')!r}\n"
         )
         return "__NON_UNIT__"
+
+    if scope == "CONTEXT":
+        cid = props.get("container_id")
+        if cid is not None and str(cid).strip():
+            return str(cid).strip()
+        return "__CONTEXT__"
 
     # UNIT strict contract
     uid = p.get("unit_id", None)
@@ -309,6 +324,8 @@ def build_psets_for_payload(
 def container_display_name(scope: str, cid: str) -> str:
     if scope == "NON_UNIT":
         return "NON_UNIT"
+    if scope == "CONTEXT":
+        return "CONTEXT"
     return f"Unit_{cid}"
 
 

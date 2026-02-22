@@ -1,0 +1,313 @@
+// ================================================================
+// Curtain-wall GH→IFC Framework  (v3 — 2026-02)
+// ================================================================
+//
+// KEY CONCEPTS
+// ────────────
+// Scope   : How a payload is routed into an IFC container group.
+//   UNIT      → hoistable / shippable unit  (keyed by unit_id)
+//   NON_UNIT  → grouped non-unit element    (keyed by container_id)
+//   CONTEXT   → structural reference object (keyed by container_id)
+//               beams, slabs, steel, embedded parts, etc.
+//
+// Kind    : What the payload physically represents.
+//   Part  → geometric component (extrusion, bracket, glazing panel…)
+//   Bulk  → non-geometric / loose item (fastener pack, sealant…)
+//
+// AssemblyMeta : Special payload (category == "__ASSEMBLY_META__").
+//   - No geometry element created.
+//   - Carries pset_overrides for the container or sub-assembly node.
+//   - geo may be an empty Mesh (GH DataTree workaround; ignored by exporter).
+//
+//
+// GH PIPELINE
+// ───────────
+//   Builder(s)
+//   → [ifc_override.py]         optional, injects 3rd slot [geo, name, override_data]
+//   → [ifc_assembly (sub)]      optional, wraps payloads in sub-assembly level
+//   → Entwine({0;…}/{1;…}/{2;…})
+//   → ifc_assembly (main)       outermost level → becomes IFC container
+//   → ifc_exporter              writes IFC4 file
+//
+// GH DOMAIN ROUTING
+// ─────────────────
+//   {0;…} → UNIT     (hoistable units)
+//   {1;…} → NON_UNIT (non-unit grouped elements)
+//   {2;…} → CONTEXT  (structural reference objects)
+//           Domain 2 is AUTHORITATIVE: always overrides props.scope.
+//   Bulk payloads merge into Domain 0 or 1 based on their Scope input.
+//
+//
+// ASSEMBLY MECHANISM  (props.assembly_path)
+// ─────────────────────────────────────────
+//   List of nodes ordered OUTERMOST (index 0) → innermost (last index).
+//   _stable_wrap_outer PREPENDS: most-recently applied = index 0.
+//   Exporter consumes index 0 as the IFC container name, then builds
+//   the inner chain (index 1+) as nested IfcElementAssembly nodes.
+//
+//   GH wiring rule:
+//     Apply sub-assembly component FIRST, main/container assembly LAST.
+//     The last-applied assembly lands at index 0 and becomes the container.
+//
+//   Idempotent: applying the same key twice does not create extra depth.
+//
+//
+// IFC OUTPUT HIERARCHY
+// ────────────────────
+//   IfcProject → IfcSite → IfcBuilding → IfcBuildingStorey
+//     └─ IfcElementAssembly  [Container]     one per (scope × container_id)
+//          ├─ Pset_Unit / Pset_NonUnit / Pset_Context   (ContainerCode, …)
+//          └─ IfcElementAssembly  [Sub-assembly node]   from assembly_path[1:]
+//               └─ IfcMember | IfcBeam | IfcBuildingElementProxy  [Leaf element]
+//
+//   IFC class of leaf element:
+//     1. props.ifc_class_hint  (if present)
+//     2. category mapping: Vertical→IfcMember, Horizontal→IfcBeam
+//     3. fallback: IfcBuildingElementProxy
+//
+// ================================================================
+
+
+// ────────────────────────────────────────────────────────────────
+// PAYLOAD  —  the core data unit flowing through the GH pipeline
+// ────────────────────────────────────────────────────────────────
+
+Table Payload {
+  schema    int      [not null]  // internal payload schema version (NOT IFC schema version)
+  unit_id   varchar  [not null]  // UNIT scope: actual unit code; else "__NON_UNIT__"
+  geo       geometry             // Rhino mesh geometry; None for AssemblyMeta payloads
+  name      varchar  [not null]  // display name / element code
+  category  varchar  [not null]  // IFC class hint source; "__ASSEMBLY_META__" for meta payloads
+  // props: dict  ← see Props table below
+
+  Note: '''
+    Stable core keys — builders MUST NOT add new top-level keys.
+    All evolving fields go into props.
+    category == "__ASSEMBLY_META__" triggers special exporter handling:
+      no geometry element is created; pset_overrides apply to assembly node.
+  '''
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// PROPS  —  mutable bag inside Payload.props
+// ────────────────────────────────────────────────────────────────
+
+Table Props {
+  // Routing
+  scope          varchar  [not null]  // "UNIT" | "NON_UNIT" | "CONTEXT"
+  kind           varchar  [not null]  // "Part" | "Bulk"
+  container_id   varchar              // NON_UNIT / CONTEXT group key
+                                      //   missing → default "__NON_UNIT__" / "__CONTEXT__"
+
+  // Element identity
+  element_code   varchar  [not null]  // canonical code (part_no for Part, bulk_code for Bulk)
+  ifc_class_hint varchar              // override IFC class: "IfcMember" | "IfcBeam" | etc.
+  source_guid    varchar              // stable GUID (assigned by exporter via guid_file.json)
+
+  // Assembly chain  (see AssemblyPathNode)
+  // assembly_path: list[AssemblyPathNode]  — OUTERMOST first (index 0)
+  assembly_path  json                 // [{name, key, role?}, …]
+
+  // User overrides  (injected by ifc_override.py via 3rd slot [geo, name, override_data])
+  pset_overrides json                 // {PsetName: {key: value, …}, …}
+
+  Note: '''
+    Kind-specific fields are documented in Props_Part and Props_Bulk below.
+    pset_overrides are applied AFTER schema-driven psets (user values win).
+  '''
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// ASSEMBLY PATH NODE  —  one entry per level in props.assembly_path
+// ────────────────────────────────────────────────────────────────
+
+Table AssemblyPathNode {
+  name  varchar  [not null]  // IFC element name of this assembly level
+  key   varchar  [not null]  // deduplication key (same key = same node, no extra depth)
+  role  varchar              // optional label: "FRAME" | "TRIM" | "GENERIC" | …
+
+  Note: '''
+    Ordered OUTERMOST (index 0) → innermost (last index).
+    Exporter reads index 0 as the container name (then strips it).
+    Remaining nodes (index 1+) become nested IfcElementAssembly nodes.
+    Stable wrap: applying the same key twice is idempotent.
+  '''
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// KIND-SPECIFIC PROPS EXTENSIONS
+// ────────────────────────────────────────────────────────────────
+
+Table Props_Part {
+  part_no          varchar  [not null]
+  dims_L           float               // cut length (mm)
+  dims_W           float               // width (mm)
+  dims_R           float               // radius / secondary dimension
+  material_name    varchar             // "AL6063" | "SS304" | …
+  finish_type      varchar             // "Anodized" | "PowderCoat" | …
+  finish_thick_um  float               // finish thickness (μm)
+  color_code       varchar             // RAL / project color code
+
+  Note: 'Extension of Props when kind == "Part".'
+}
+
+Table Props_Bulk {
+  bulk_code         varchar  [not null]
+  quantity          int
+  area_m2           float
+  length_m          float
+  install_location  varchar
+  color_code        varchar
+
+  Note: 'Extension of Props when kind == "Bulk".'
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// CONTAINER PSETS  —  on IfcElementAssembly container elements
+//
+// All three types share ContainerCode as the identifier key.
+// Consistent downstream querying:  *.ContainerCode
+// ────────────────────────────────────────────────────────────────
+
+Table Pset_Unit {
+  ContainerCode    varchar  [not null]  // = payload.unit_id
+  BayNo            varchar              // bay / grid reference  e.g. "02N"
+  Level            varchar              // floor / storey label  e.g. "10F"
+  InstallSequence  int                  // installation order
+
+  Note: 'Applied to the top-level IfcElementAssembly for each UNIT group.'
+}
+
+Table Pset_NonUnit {
+  ContainerCode  varchar  [not null]  // = props.container_id  or  "__NON_UNIT__"
+
+  Note: 'Applied to the top-level IfcElementAssembly for each NON_UNIT group.'
+}
+
+Table Pset_Context {
+  ContainerCode  varchar  [not null]  // = props.container_id  or  "__CONTEXT__"
+
+  Note: '''
+    Applied to the top-level IfcElementAssembly for each CONTEXT group.
+    CONTEXT = structural reference objects: beams, slabs, steel, embedded parts.
+    Forced by Domain 2 path in the GH DataTree.
+  '''
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// ELEMENT PSETS  —  on leaf geometric elements (IfcMember / IfcBeam / etc.)
+// ────────────────────────────────────────────────────────────────
+
+Table Pset_Part {
+  PartCode     varchar  [not null]
+  PartType     varchar              // "Vertical" | "Horizontal" | "Bracket" | …
+  ProfileCode  varchar              // extrusion profile code
+  Material     varchar              // "AL6063" | "SS304" | …
+  Finish       varchar              // "Anodized" | "PowderCoat" | …
+  Length_mm    float
+  Width_mm     float
+
+  Note: 'Applied when kind == "Part".'
+}
+
+Table Pset_Bulk {
+  BulkCode         varchar  [not null]
+  Quantity         int
+  Area_m2          float
+  Length_m         float
+  InstallLocation  varchar
+
+  Note: 'Applied when kind == "Bulk".'
+}
+
+Table Pset_CWAppearance {
+  ColorCode  varchar  // RAL / project color reference
+
+  Note: 'Applied when props.color_code is set. Shared across Part and Bulk.'
+}
+
+Table Pset_Override {
+  // User-defined key/value injected via ifc_override.py.
+  // Default pset name is "Pset_Override"; user may specify any pset name.
+  // Canonical format: { "PsetName": { "Key": value, … }, … }
+  PsetName  varchar  [not null]  // target pset name (default: "Pset_Override")
+  Key       varchar  [not null]  // property key
+  Value     varchar              // property value (any type, serialized as string)
+
+  Note: '''
+    Any pset name accepted.
+    Merged into props.pset_overrides via apply_overrides_to_props().
+    Applied AFTER all schema-driven psets — user values always win.
+    On AssemblyMeta payloads: applied to the container or sub-assembly node,
+    not to a leaf element (no leaf element is created).
+  '''
+}
+
+
+// ────────────────────────────────────────────────────────────────
+// IFC OUTPUT STRUCTURE  (conceptual mapping)
+// ────────────────────────────────────────────────────────────────
+
+Table IfcSpatial {
+  id        uuid     [pk]
+  kind      varchar  [not null]  // "IfcProject" | "IfcSite" | "IfcBuilding" | "IfcBuildingStorey"
+  name      varchar  [not null]
+  elevation float                // storey only
+  parentId  uuid     [ref: > IfcSpatial.id]
+}
+
+Table IfcContainer {
+  id            uuid     [pk]
+  ifcClass      varchar  [not null]  // always "IfcElementAssembly"
+  name          varchar  [not null]  // from assembly_path[0].name  OR  auto-generated fallback
+  scope         varchar  [not null]  // "UNIT" | "NON_UNIT" | "CONTEXT"
+  container_id  varchar  [not null]  // payload.unit_id (UNIT)  or  props.container_id (others)
+  storeyId      uuid     [ref: > IfcSpatial.id]
+
+  Note: '''
+    One container per (scope × container_id) group.
+    Name: derived from assembly_path[0].name if any payload in the group has assembly_path.
+    Fallback auto-names: "Unit_{cid}"  |  "NON_UNIT"  |  "CONTEXT".
+    Container pset applied after creation: Pset_Unit / Pset_NonUnit / Pset_Context.
+  '''
+}
+
+Table IfcAssemblyNode {
+  id           uuid     [pk]
+  ifcClass     varchar  [not null]  // "IfcElementAssembly"
+  name         varchar  [not null]  // from assembly_path[n].name
+  key          varchar  [not null]  // deduplication key
+  depth        int      [not null]  // 0 = direct child of container
+  containerId  uuid     [ref: > IfcContainer.id]
+  parentNodeId uuid     [ref: > IfcAssemblyNode.id]  // null if depth == 0
+
+  Note: '''
+    Built from assembly_path[1:] (inner levels; index 0 consumed by container).
+    Cached per container: same key at same depth → same node reused.
+    pset_overrides from AssemblyMeta payloads are applied to the deepest node.
+  '''
+}
+
+Table IfcLeafElement {
+  id          uuid     [pk]
+  ifcClass    varchar  [not null]  // "IfcMember" | "IfcBeam" | "IfcBuildingElementProxy"
+  name        varchar  [not null]
+  sourceGuid  varchar              // stable GUID from guid_file.json
+  containerId uuid     [ref: > IfcContainer.id]
+  nodeId      uuid     [ref: > IfcAssemblyNode.id]  // null → direct child of container
+
+  Note: '''
+    Geometric leaf elements (kind == Part or Bulk with geometry).
+    Assigned to deepest assembly node; or directly to container if no inner chain.
+    IFC class resolution order:
+      1. props.ifc_class_hint
+      2. category mapping: Vertical → IfcMember, Horizontal → IfcBeam
+      3. fallback: IfcBuildingElementProxy
+    Geometry: mesh representation (force_faceted_brep=True).
+  '''
+}

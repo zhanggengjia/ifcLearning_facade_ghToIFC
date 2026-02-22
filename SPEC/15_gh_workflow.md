@@ -79,19 +79,25 @@ MatData MUST be a Grasshopper DataTree with domain-based paths to separate diffe
   - Shared/common elements not belonging to specific units
   - Example: `{1;0}`, `{1;1}`, etc.
 
+- **Domain 2**: `{2;...}` - CONTEXT branches (structural reference objects)
+  - Beams, slabs, steel beams used as spatial/structural reference
+  - Domain path is **authoritative**: forces `scope = "CONTEXT"`, overriding `props.scope`
+  - Flow: nonUnit builder → assembly → Entwine(`{2;...}`) → Exporter
+  - Creates a separate "CONTEXT" IfcElementAssembly container under the storey
+
 Bulk payloads (`kind=Bulk`) are NOT a separate domain.
-They flow through Domain 0 or Domain 1 depending on their scope,
-and are merged via Entwine alongside other payloads.
+They flow through Domain 0 or Domain 1 depending on their scope.
 
 ## Scope Determination Priority
 
 When routing payloads, use this priority order:
 
-1. **First**: Check `payload.props.scope` if present and valid
-2. **Second**: Infer from domain path if scope is missing
+1. **First**: Domain 2 path → always forces `scope = "CONTEXT"` (overrides `props.scope`)
+2. **Second**: Check `payload.props.scope` if present and valid (Domains 0/1)
+3. **Third**: Infer from domain path if scope is missing
    - Domain 0 → scope = "UNIT"
    - Domain 1 → scope = "NON_UNIT"
-3. **Fallback**: Default to "UNIT" with warning if cannot determine
+4. **Fallback**: Default to "UNIT" with warning if cannot determine
 
 ## General Rules
 
@@ -395,6 +401,12 @@ Exporter input MUST be a DataTree with domain paths:
   - If missing, exporter assigns default `"__NON_UNIT__"`
   - MUST NOT be grouped into UNIT containers
 
+- **Domain 2** `{2;...}`: CONTEXT payloads (structural reference objects)
+  - Domain path forces `scope = "CONTEXT"` (overrides any `props.scope`)
+  - Goes into a single "CONTEXT" container (IfcElementAssembly) under the storey
+  - Container pset: `Pset_Context { GroupCode }`
+  - Assembly chain rules apply as normal
+
 Bulk payloads (`kind=Bulk`) are merged into Domain 0 or Domain 1
 depending on their scope. No separate domain needed.
 
@@ -405,7 +417,7 @@ Exporter may internally flatten after reading domain structure.
 
 ### Mixed Input Support
 
-A single MatData may contain mixed domains (Domain 0 + Domain 1).
+A single MatData may contain mixed domains (Domain 0 + Domain 1 + Domain 2).
 Both Part and Bulk payloads coexist within the same domains.
 
 Exporter routing rules:
