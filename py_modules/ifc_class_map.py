@@ -25,6 +25,14 @@ CATEGORY_TO_IFC: Dict[str, str] = {
     "screw": "IfcMechanicalFastener",
     "fitting": "IfcDiscreteAccessory",
 
+    # structural/context elements (CONTEXT scope)
+    "beam": "IfcBeam",
+    "column": "IfcColumn",
+    "slab": "IfcSlab",
+    "wall": "IfcWall",
+    "footing": "IfcFooting",
+    "pile": "IfcPile",
+
 }
 
 def resolve_ifc_class_hint(category_value: str) -> str:

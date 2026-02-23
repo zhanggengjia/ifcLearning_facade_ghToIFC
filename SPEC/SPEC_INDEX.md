@@ -30,6 +30,11 @@ Goal: Keep specs modular. The assistant MUST NOT read every spec file.
 
 - 15_gh_workflow.md → Grasshopper component workflow and usage rules
 
+## IFC Groups
+
+- 50_group_workflow.md
+  Use when tasks involve: IFC groups, logical grouping, zone assignment, phase grouping, multi-group membership.
+
 ## Rule
 
 Before coding, pick the smallest subset of specs needed for the task.

@@ -1,22 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-ifc_bulk_builder.py (patched to align with your existing utils/*)
+ifc_nonUnit_builder.py
 
-This builder:
-- Does NOT change your GH-facing inputs/outputs.
-- Keeps your naming convention: raw_name = "[PartNo]_[GUID]" or "[PartNo]".
-- Keeps the same reserved bags in props (dims/material/finish/color_code).
-- Uses your existing utils (gh_utils + payload_utils) WITHOUT modifying them.
+This builder creates NON_UNIT or CONTEXT payloads for non-unit elements.
+
+Key features:
+- Supports two scope modes: NON_UNIT (default) and CONTEXT
+- Keeps naming convention: raw_name = "[PartNo]_[GUID]" or "[PartNo]"
+- Keeps the same reserved bags in props (dims/material/finish/color_code)
+- Uses existing utils (gh_utils + payload_utils) without modification
 
 GH Inputs:
   Obj(Tree/List/Item): leaf = [geo, raw_name]
+                       or [geo, raw_name, override_payload]
   Category(Item)     : str (required)
-  BulkContainerId    : str (required)
-  SchemaVersion      : int
+  SchemaVersion      : int (default: 1)
+  Scope              : str (default: "NON_UNIT")
+                       - "NON_UNIT": for general non-unit elements
+                       - "CONTEXT": for context reference objects (beams, slabs, structural refs)
 
 Outputs:
-  MatData : list[Payload]
+  MatData : Tree/List[Payload] (matches input structure)
   Log     : str
+
+Usage:
+  NonUnit_Builder: Use default Scope="NON_UNIT"
+  Context_Builder: Set Scope="CONTEXT"
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ def build_nonUnit_matdata(
     Category: Any,
     # NonUnitContainerId: Any,
     SchemaVersion: int = 1,
+    Scope: str = "NON_UNIT",
 ) -> Tuple[Any, str]:
     if Obj is None:
         return [], "nonUnit_builder: Obj is None."
@@ -46,6 +56,11 @@ def build_nonUnit_matdata(
     cat = str(unwrap_gh(Category) or "").strip()
     if not cat:
         raise Exception("nonUnit_builder: Category is required.")
+
+    # Normalize scope: support "NON_UNIT" (default) or "CONTEXT"
+    scope = str(unwrap_gh(Scope) or "NON_UNIT").strip().upper()
+    if scope not in ("NON_UNIT", "CONTEXT"):
+        scope = "NON_UNIT"  # Fallback to NON_UNIT if invalid
 
     # container_id = str(unwrap_gh(NonUnitContainerId) or "").strip()
     # if not container_id:
@@ -87,7 +102,7 @@ def build_nonUnit_matdata(
 
             ifc_class_hint = resolve_ifc_class_hint(cat)
             props: Dict[str, Any] = {
-                "scope": "NON_UNIT",
+                "scope": scope,
                 "kind": "Part",
                 "element_code": part_no,
                 "ifc_class_hint": ifc_class_hint,
@@ -129,8 +144,8 @@ def build_nonUnit_matdata(
                 out_list.append(payload)
             count += 1
 
-    # log = f"nonUnit_builder: created {count} NON_UNIT payloads (container={container_id})."
-    log = f"nonUnit_builder: created {count} NON_UNIT payloads."
+    # log = f"nonUnit_builder: created {count} {scope} payloads (container={container_id})."
+    log = f"nonUnit_builder: created {count} {scope} payloads."
     if bad_leaf:
         log += f" bad_leaf={bad_leaf}"
     return (out_tree if out_tree is not None else out_list), log

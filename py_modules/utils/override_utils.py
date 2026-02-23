@@ -105,10 +105,52 @@ def apply_overrides_to_props(
     *,
     default_pset: str = DEFAULT_OVERRIDE_PSET,
 ) -> None:
-    """In-place: ensure props['pset_overrides'] exists and merge override_obj."""
+    """
+    In-place: merge override_obj into props.
+
+    Handles:
+    - pset_overrides: merged into props["pset_overrides"]
+    - groups: merged into props["groups"] (union, no duplicates)
+    - Other dict keys: ignored (reserved for future extensions)
+    """
     if not isinstance(props, dict):
         return
-    existing = props.get("pset_overrides")
-    merged = merge_pset_overrides(existing if isinstance(existing, dict) else None, override_obj, default_pset=default_pset)
-    if merged:
-        props["pset_overrides"] = merged
+
+    o = unwrap_gh(override_obj)
+    if not isinstance(o, dict):
+        # Legacy behavior: treat non-dict as pset override
+        existing = props.get("pset_overrides")
+        merged = merge_pset_overrides(existing if isinstance(existing, dict) else None, override_obj, default_pset=default_pset)
+        if merged:
+            props["pset_overrides"] = merged
+        return
+
+    # Handle pset_overrides
+    if "pset_overrides" in o or any(k.lower().startswith("pset") for k in o.keys() if isinstance(k, str)):
+        existing = props.get("pset_overrides")
+        # Only pass pset-related keys to merge_pset_overrides (exclude "groups" and other metadata)
+        pset_data = {k: v for k, v in o.items() if k == "pset_overrides" or (isinstance(k, str) and k.lower().startswith("pset"))}
+        merged = merge_pset_overrides(existing if isinstance(existing, dict) else None, pset_data, default_pset=default_pset)
+        if merged:
+            props["pset_overrides"] = merged
+
+    # Handle groups
+    if "groups" in o:
+        groups_input = o["groups"]
+        if isinstance(groups_input, list):
+            # Merge with existing groups (union)
+            existing_groups = props.get("groups", [])
+            if not isinstance(existing_groups, list):
+                existing_groups = []
+
+            # Merge and deduplicate
+            seen = set()
+            merged_groups = []
+            for g in existing_groups + groups_input:
+                g_str = str(g).strip()
+                if g_str and g_str not in seen:
+                    seen.add(g_str)
+                    merged_groups.append(g_str)
+
+            if merged_groups:
+                props["groups"] = merged_groups

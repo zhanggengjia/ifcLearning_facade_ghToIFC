@@ -136,7 +136,12 @@ def export_ifc_from_matdata(
             """
             if not props:
                 return
-            clean = {k: v for k, v in props.items() if v is not None and v != ""}
+            # Filter: exclude None, empty strings, and non-scalar values (dicts/lists)
+            # IfcOpenShell expects scalar values or unit-value dicts with "Unit" and "NominalValue" keys
+            clean = {
+                k: v for k, v in props.items()
+                if v is not None and v != "" and not isinstance(v, (dict, list))
+            }
             if not clean:
                 return
 
@@ -360,6 +365,9 @@ def export_ifc_from_matdata(
         created_containers = 0
         created_assembly_nodes = 0
 
+        # Track payload → IFC element mapping for group assignment
+        payload_to_elem: Dict[int, Any] = {}
+
         for (scope, cid), items in containers.items():
             # Derive container name from outermost assembly_path level if available.
             # This allows ifc_assembly to control the top-level name (e.g. per-unit names).
@@ -485,6 +493,9 @@ def export_ifc_from_matdata(
                 elem = create_element(pl)
                 created_elements += 1
 
+                # Track payload → element mapping for groups
+                payload_to_elem[id(pl)] = elem
+
                 if apath:
                     # Strip outermost level (already used as container name).
                     inner_apath = apath[1:]
@@ -517,6 +528,67 @@ def export_ifc_from_matdata(
                 f"assembly_nodes={len(node_cache)}\n"
             )
 
+        # ---------------------------------------------------------------------
+        # Create IFC Groups (logical grouping)
+        # ---------------------------------------------------------------------
+        # Collect all elements with group membership
+        # groups_dict: {group_name: [ifc_elements]}
+        from collections import defaultdict
+        groups_dict = defaultdict(list)
+
+        # Collect groups from payloads using the payload → element mapping
+        for pl in payloads:
+            # Skip AssemblyMeta payloads (no geometric element)
+            cat = str(pl.get("category", "") or "").strip()
+            if cat == "__ASSEMBLY_META__":
+                continue
+
+            props = pl.get("props", {})
+            if not isinstance(props, dict):
+                continue
+
+            groups = props.get("groups", [])
+            if not isinstance(groups, list) or not groups:
+                continue
+
+            # Find corresponding IFC element using our mapping
+            elem = payload_to_elem.get(id(pl))
+            if not elem:
+                # Element not found (payload didn't create an element, e.g., geo=None)
+                log_add(f"[WARN] Group: cannot find element for payload name={pl.get('name','')!r}\n")
+                continue
+
+            # Add element to all its groups
+            for group_name in groups:
+                group_name = str(group_name).strip()
+                if group_name:
+                    groups_dict[group_name].append(elem)
+
+        # Create IfcGroup entities
+        created_groups = 0
+        for group_name, elements in groups_dict.items():
+            if not elements:
+                continue
+
+            # Create IfcGroup
+            ifc_group = ifc_run(
+                "root.create_entity",
+                model,
+                ifc_class="IfcGroup",
+                name=group_name,
+            )
+
+            # Assign elements to group
+            ifc_run(
+                "group.assign_group",
+                model,
+                products=elements,
+                group=ifc_group,
+            )
+
+            created_groups += 1
+            log_add(f"[Group] Created '{group_name}' with {len(elements)} elements\n")
+
         model.write(ResolvedOutPath)
 
         OK = True
@@ -524,6 +596,7 @@ def export_ifc_from_matdata(
         Log += f"Created elements: {created_elements}\n"
         Log += f"Created containers (UNIT+NON_UNIT): {created_containers}\n"
         Log += f"Created assembly nodes (all containers): {created_assembly_nodes}\n"
+        Log += f"Created groups (IfcGroup): {created_groups}\n"
         Log += f"Wrote: {ResolvedOutPath}\n"
 
         return OK, Log, ResolvedOutPath

@@ -78,6 +78,27 @@ ASSEMBLY_META_CATEGORY = "__ASSEMBLY_META__"
 DEFAULT_ASSEMBLY_PSET = "Pset_Assembly"
 
 
+def _pset_name_for_scope(scope: str) -> str:
+    """Return the appropriate Pset name based on scope.
+
+    - UNIT → Pset_Unit
+    - NON_UNIT → Pset_NonUnit
+    - CONTEXT → Pset_Context
+    - Others → Pset_Assembly (fallback)
+
+    This ensures assembly-level KV overrides (BayNo, Level, InstallSequence)
+    are written to the correct container Pset per SPEC/30_exporter_pipeline.md.
+    """
+    s = str(scope or "").strip().upper()
+    if s == "UNIT":
+        return "Pset_Unit"
+    if s == "NON_UNIT":
+        return "Pset_NonUnit"
+    if s == "CONTEXT":
+        return "Pset_Context"
+    return DEFAULT_ASSEMBLY_PSET
+
+
 def is_payload(x: Any) -> bool:
     """Check whether *x* looks like a valid Payload dict.
 
@@ -336,16 +357,23 @@ def _make_assembly_meta_payload(
       - category = ASSEMBLY_META_CATEGORY ("__ASSEMBLY_META__")
       - geo = tiny dummy mesh (placeholder, not exported to IFC)
       - props.kind = "AssemblyMeta"
-      - props.pset_overrides = { "Pset_Assembly": {k: v, ...} }
+      - props.pset_overrides = { <scope-specific-pset>: {k: v, ...} }
+
+    The Pset name is determined by scope:
+      - UNIT → Pset_Unit
+      - NON_UNIT → Pset_NonUnit
+      - CONTEXT → Pset_Context
+      - Others → Pset_Assembly (fallback)
 
     The exporter writes pset_overrides onto the parent IfcElementAssembly
     node rather than creating a standalone IFC element for this payload.
     """
+    pset_name = _pset_name_for_scope(scope)
     props: Dict[str, Any] = {
         "scope": scope,
         "kind": "AssemblyMeta",
         "unit_id": unit_id,
-        "pset_overrides": {DEFAULT_ASSEMBLY_PSET: dict(kv)},
+        "pset_overrides": {pset_name: dict(kv)},
     }
     return cast(Payload, {
         "schema": int(schema),
@@ -512,7 +540,9 @@ def annotate_subassembly(
                 schema = int(pl.get("schema", 1) or 1)
                 pr = ensure_props(pl)
                 scope = str(pr.get("scope", "UNIT") or "UNIT").strip().upper()
-                scope = "NON_UNIT" if scope == "NON_UNIT" else "UNIT"
+                # Support all three scope values: UNIT, NON_UNIT, CONTEXT
+                if scope not in ("UNIT", "NON_UNIT", "CONTEXT"):
+                    scope = "UNIT"
                 break
 
         # 4b. Annotate each payload with the assembly_path node

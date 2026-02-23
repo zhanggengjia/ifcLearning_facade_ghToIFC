@@ -26,10 +26,23 @@ When applying subassembly(Name, KeySuffix, Role):
 # Assembly override (Key/Value)
 
 - Optional Key/Value inputs inject KV onto the _assembly node_
-- Implemented by emitting one synthetic AssemblyMeta payload per unit branch:
+- Implemented by emitting one synthetic AssemblyMeta payload per branch:
   - category=`"__ASSEMBLY_META__"`
-  - geo=None
-  - props.pset_overrides = { "Pset_Assembly": {K: V, ...} }
+  - geo=None (or tiny dummy mesh for GH compatibility)
+  - props.pset_overrides = { <scope-specific-pset>: {K: V, ...} }
+
+## Pset selection by scope
+
+The Pset name is determined by the payload's scope:
+
+| Scope | Pset name for assembly overrides |
+|---|---|
+| UNIT | `Pset_Unit` |
+| NON_UNIT | `Pset_NonUnit` |
+| CONTEXT | `Pset_Context` |
+| Others | `Pset_Assembly` (fallback) |
+
+This ensures assembly-level overrides (e.g., BayNo, Level, InstallSequence) are written to the correct container Pset.
 
 # UnitId validation
 

@@ -34,11 +34,15 @@ MatData may be:
 
 # Semantic fields in props (common)
 
-- scope: "UNIT" | "NON_UNIT"
+- scope: "UNIT" | "NON_UNIT" | "CONTEXT"
+  - "UNIT": unit-level elements (curtain wall units, etc.)
+  - "NON_UNIT": general non-unit elements
+  - "CONTEXT": context reference objects (beams, slabs, structural refs)
 - kind: "Part" | "Bulk" | "AssemblyMeta" (etc.)
 - ifc_class_hint: optional IFC entity hint
 - pset_overrides: dict[pset_name -> dict[k->v]]
 - assembly_path: list[dict] # preferred canonical format
+- groups: list[str] # optional list of IFC group names this element belongs to
 
 ## Special payloads
 
@@ -53,8 +57,13 @@ This is a canonical string constant (NOT markdown formatting).
 Rules:
 
 - category MUST equal `"__ASSEMBLY_META__"`
-- geo MUST be None
+- geo MUST be None (or tiny dummy mesh for GH compatibility)
 - props.pset_overrides carries metadata intended for assembly nodes
+  - Pset name is determined by scope:
+    - UNIT → Pset_Unit
+    - NON_UNIT → Pset_NonUnit
+    - CONTEXT → Pset_Context
+    - Others → Pset_Assembly (fallback)
 - No geometric IFC element should be created for this payload
 - Used only to inject metadata onto assembly nodes
 

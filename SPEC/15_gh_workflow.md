@@ -160,6 +160,89 @@ Tree structure must remain unchanged.
 
 ---
 
+## 4.1.5 Group Component
+
+File: `ifc_group.py`
+
+### Purpose
+
+Mark objects for logical IFC group membership (IfcGroup).
+
+Groups vs Assemblies:
+- **IfcElementAssembly**: Physical/geometric composition (frame + panels = unit)
+- **IfcGroup**: Logical grouping (Zone A, Installation Phase 1, Floor 3)
+
+An element can belong to multiple groups simultaneously.
+
+### Input
+
+Obj [any][tree access]
+→ GH wrapper `[Geometry, Name]` or `[Geometry, Name, override_data]`
+
+GroupNames [str | list | tree]
+→ Group name(s) to assign
+  - Single string: all objects get same group
+  - List: all objects get all groups in list
+  - Tree (tree access): per-branch groups
+
+### Output
+
+MatData (annotated GH wrappers)
+Log
+
+### Behavior
+
+Transforms wrapper:
+```
+[Geometry, Name] → [Geometry, Name, {"groups": ["GroupName"]}]
+```
+
+If override_data already exists, merges groups:
+```
+[Geometry, Name, {existing}] → [Geometry, Name, {existing, "groups": [...]"}]
+```
+
+Can be called multiple times to add multiple groups (union).
+
+### Workflow Position
+
+**BEFORE Builder** (annotates GH wrappers):
+```
+Extract obj ([geo, name])
+↓
+ifc_group(GroupNames="Zone_A")  # Mark for group
+↓
+([geo, name, {groups: ["Zone_A"]}])
+↓
+Builder (writes to payload.props.groups)
+↓
+Exporter (creates IfcGroup and assigns elements)
+```
+
+### Usage Examples
+
+Single group for all objects:
+```python
+annotated_obj, log = annotate_group(Obj, "Zone_A")
+```
+
+Multiple groups for all objects:
+```python
+annotated_obj, log = annotate_group(Obj, ["Zone_A", "Phase_1"])
+```
+
+Per-branch groups (tree access):
+```python
+# GroupNames is a DataTree with different groups per branch
+annotated_obj, log = annotate_group(Obj, GroupNamesTree)
+```
+
+### Exporter Behavior
+
+Exporter creates IfcGroup entities for each unique group name and assigns all elements with matching group membership.
+
+---
+
 ## 4.2 Unit_Builder
 
 File: `ifc_unit_builder.py`
@@ -202,34 +285,78 @@ UnitId must exist at top-level payload["unit_id"].
 
 ---
 
-## 4.3 NonUnit*Builder *(reserved / WIP)\_
+## 4.3 NonUnit_Builder / Context_Builder
 
 File: `ifc_nonUnit_builder.py`
 
 ### Purpose
 
-Create NON_UNIT payloads for:
+Create NON_UNIT or CONTEXT payloads for:
 
-- trims
-- loose parts
-- accessories
+- **NON_UNIT**: trims, loose parts, accessories
+- **CONTEXT**: structural reference objects (beams, slabs, steel)
 
 ### Input
 
 Obj [any][tree access]
+→ GH wrapper `[Geometry, Name]` or `[Geometry, Name, override_data]`
+
 Category [str][item access]
+→ Element category (required)
+
+SchemaVersion [int][item access]
+→ Payload schema version (default: 1)
+
 Scope [str][item access]
-UnitId [str][tree access]
+→ "NON_UNIT" (default) or "CONTEXT"
 
 ### Output
 
-MatData
+MatData (Tree/List matching input structure)
 Log
 
-### Notes
+### Behavior
 
-Not fully active yet.
-Reserved for future NON_UNIT workflows.
+Creates payload with:
+- scope = Scope input ("NON_UNIT" or "CONTEXT")
+- kind = "Part"
+- unit_id = "__NON_UNIT__" (placeholder)
+
+### Usage Patterns
+
+**NonUnit_Builder** (GHPython component):
+```python
+MatData, Log = build_nonUnit_matdata(
+    Obj=Obj,
+    Category=Category,
+    SchemaVersion=SchemaVersion
+    # Scope defaults to "NON_UNIT"
+)
+```
+
+**Context_Builder** (GHPython component):
+```python
+MatData, Log = build_nonUnit_matdata(
+    Obj=Obj,
+    Category=Category,
+    SchemaVersion=SchemaVersion,
+    Scope="CONTEXT"  # Explicitly set to CONTEXT
+)
+```
+
+### Workflow
+
+NON_UNIT workflow:
+```
+NonUnit_Builder → Assembly → Entwine({1;...}) → Exporter
+```
+
+CONTEXT workflow:
+```
+Context_Builder → Assembly → Entwine({2;...}) → Exporter
+```
+
+The Domain path ({1;...} or {2;...}) determines final container grouping.
 
 ---
 

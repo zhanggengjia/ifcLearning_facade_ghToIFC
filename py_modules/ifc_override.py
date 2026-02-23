@@ -357,6 +357,12 @@ def override_obj_tree(Obj: Any, Key: Any, Value: Any, UnitId: Any) -> Tuple[Any,
             wrapped = {DEFAULT_OVERRIDE_PSET: kv} if kv else {}
             merged = merge_pset_overrides(existing, wrapped)
 
+            # Preserve groups field if present in existing override_data
+            if isinstance(existing, dict) and "groups" in existing:
+                if not isinstance(merged, dict):
+                    merged = {}
+                merged["groups"] = existing["groups"]
+
             out_tree.Add(wrap_gh([geo, name, merged]), ghp)
 
     logs.append("override: done")
