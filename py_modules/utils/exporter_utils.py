@@ -321,6 +321,79 @@ def build_psets_for_payload(
     return out
 
 
+# ---------------------------------------------------------------------------
+# IfcElementQuantity helpers
+# ---------------------------------------------------------------------------
+
+# Maps type-prefix → (IfcEntity, attribute holding the value)
+_QTO_PREFIX_MAP: Dict[str, Tuple[str, str]] = {
+    "L": ("IfcQuantityLength", "LengthValue"),
+    "A": ("IfcQuantityArea",   "AreaValue"),
+    "C": ("IfcQuantityCount",  "CountValue"),
+    "W": ("IfcQuantityWeight", "WeightValue"),
+}
+
+
+def parse_qto_for_product(
+    qto_overrides: Any,
+) -> List[Tuple[str, List[Tuple[str, str, str, float]]]]:
+    """Parse qto_overrides into IFC-ready quantity data.
+
+    Parameters
+    ----------
+    qto_overrides : dict
+        Structure: {QtoName: {"L:N01": 2450.0, "C:M8": 4, ...}}
+
+    Returns
+    -------
+    List of (qto_name, quantities) where quantities is a list of
+    (ifc_entity_type, value_attr, qty_name, qty_value) tuples.
+
+    Unknown prefixes and None / non-numeric values are silently skipped.
+
+    Example
+    -------
+    parse_qto_for_product({"Qto_CWPart": {"L:N01": 2450.0, "C:M8": 4}})
+    → [("Qto_CWPart", [
+          ("IfcQuantityLength", "LengthValue", "N01",  2450.0),
+          ("IfcQuantityCount",  "CountValue",  "M8",   4.0),
+       ])]
+    """
+    result: List[Tuple[str, List[Tuple[str, str, str, float]]]] = []
+    if not isinstance(qto_overrides, dict):
+        return result
+
+    for qto_name, kv in qto_overrides.items():
+        if not isinstance(qto_name, str) or not qto_name.strip():
+            continue
+        if not isinstance(kv, dict):
+            continue
+
+        quantities: List[Tuple[str, str, str, float]] = []
+        for raw_key, value in kv.items():
+            if not isinstance(raw_key, str):
+                continue
+            prefix, _, qty_name = raw_key.partition(":")
+            if not qty_name:
+                continue
+            entry = _QTO_PREFIX_MAP.get(prefix.upper())
+            if not entry:
+                continue  # unknown prefix → skip
+            if value is None:
+                continue
+            try:
+                qty_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            ifc_type, attr = entry
+            quantities.append((ifc_type, attr, qty_name, qty_value))
+
+        if quantities:
+            result.append((qto_name.strip(), quantities))
+
+    return result
+
+
 def container_display_name(scope: str, cid: str) -> str:
     if scope == "NON_UNIT":
         return "NON_UNIT"

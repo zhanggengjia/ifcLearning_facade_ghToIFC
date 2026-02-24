@@ -32,6 +32,7 @@ from utils.exporter_utils import (
     get_scope,
     get_kind,
     build_psets_for_payload,
+    parse_qto_for_product,
     container_display_name,
     parse_assembly_path,
     ensure_assembly_chain,
@@ -182,6 +183,30 @@ def export_ifc_from_matdata(
                 ifc_run("pset.edit_pset", model, pset=pset, properties=clean)
 
         # ---------------------------------------------------------------------
+        # Qto helper
+        # ---------------------------------------------------------------------
+        def add_qto(product: Any, qto_overrides: Any) -> None:
+            """Create IfcElementQuantity entities and link to product."""
+            for qto_name, qty_list in parse_qto_for_product(qto_overrides):
+                quantities = []
+                for ifc_type, attr, qty_name, qty_value in qty_list:
+                    q = model.create_entity(ifc_type, Name=qty_name, **{attr: qty_value})
+                    quantities.append(q)
+                if quantities:
+                    qto_ent = model.create_entity(
+                        "IfcElementQuantity",
+                        GlobalId=ifcopenshell.guid.new(),
+                        Name=qto_name,
+                        Quantities=quantities,
+                    )
+                    model.create_entity(
+                        "IfcRelDefinesByProperties",
+                        GlobalId=ifcopenshell.guid.new(),
+                        RelatedObjects=[product],
+                        RelatingPropertyDefinition=qto_ent,
+                    )
+
+        # ---------------------------------------------------------------------
         # Geometry helpers (keep local: exporter policy, not util)
         # ---------------------------------------------------------------------
         def brep_to_mesh(brep: "rg.Brep") -> Optional["rg.Mesh"]:
@@ -305,6 +330,11 @@ def export_ifc_from_matdata(
                     if not isinstance(kv, dict):
                         continue
                     add_pset(elem, pset_name.strip(), kv)
+
+            # Quantity sets (from ifc_qto component)
+            qto_overrides = props.get("qto_overrides")
+            if isinstance(qto_overrides, dict):
+                add_qto(elem, qto_overrides)
 
             return elem
 
@@ -469,6 +499,11 @@ def export_ifc_from_matdata(
                                     f"pset_name={pset_name!r} kv={kv!r}\n"
                                 )
                                 add_pset(deepest, pset_name.strip(), kv)
+
+                        # Quantity sets (from ifc_assembly QtoKey/QtoValue)
+                        qto_overrides = props.get("qto_overrides")
+                        if isinstance(qto_overrides, dict):
+                            add_qto(deepest, qto_overrides)
                         grouped += 1
                     else:
                         # No assembly_path means nowhere to apply; warn and skip.

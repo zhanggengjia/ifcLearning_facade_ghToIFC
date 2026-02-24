@@ -343,6 +343,9 @@ def _tiny_dummy_mesh() -> Any:
         return None
 
 
+DEFAULT_ASSEMBLY_QTO = "Qto_Assembly"
+
+
 def _make_assembly_meta_payload(
     *,
     unit_id: str,
@@ -350,6 +353,8 @@ def _make_assembly_meta_payload(
     schema: int,
     sub_name: str,
     kv: Dict[str, Any],
+    qto_kv: Optional[Dict[str, Any]] = None,
+    qto_name: str = DEFAULT_ASSEMBLY_QTO,
 ) -> Payload:
     """Build a synthetic AssemblyMeta payload carrying KV overrides.
 
@@ -358,6 +363,7 @@ def _make_assembly_meta_payload(
       - geo = tiny dummy mesh (placeholder, not exported to IFC)
       - props.kind = "AssemblyMeta"
       - props.pset_overrides = { <scope-specific-pset>: {k: v, ...} }
+      - props.qto_overrides  = { qto_name: {k: v, ...} }  (if qto_kv provided)
 
     The Pset name is determined by scope:
       - UNIT → Pset_Unit
@@ -365,8 +371,8 @@ def _make_assembly_meta_payload(
       - CONTEXT → Pset_Context
       - Others → Pset_Assembly (fallback)
 
-    The exporter writes pset_overrides onto the parent IfcElementAssembly
-    node rather than creating a standalone IFC element for this payload.
+    The exporter writes pset_overrides / qto_overrides onto the parent
+    IfcElementAssembly node rather than creating a standalone IFC element.
     """
     pset_name = _pset_name_for_scope(scope)
     props: Dict[str, Any] = {
@@ -375,6 +381,8 @@ def _make_assembly_meta_payload(
         "unit_id": unit_id,
         "pset_overrides": {pset_name: dict(kv)},
     }
+    if qto_kv:
+        props["qto_overrides"] = {qto_name: dict(qto_kv)}
     return cast(Payload, {
         "schema": int(schema),
         "unit_id": unit_id,
@@ -422,6 +430,9 @@ def annotate_subassembly(
     Role: Any = None,
     Key: Any = None,
     Value: Any = None,
+    QtoKey: Any = None,
+    QtoValue: Any = None,
+    QtoName: Any = None,
     UnitId: Any = None,
 ) -> Tuple[Any, str]:
     """Main entry point — annotate every Payload in MatData with assembly info.
@@ -446,6 +457,12 @@ def annotate_subassembly(
         Parallel lists of property keys and values for assembly-level
         IFC property-set overrides.  Can be branch-matched (per-unit)
         or single-branch (common to all units).
+    QtoKey / QtoValue : GH DataTree or list, optional
+        Parallel lists for assembly-level IfcElementQuantity entries.
+        Keys use type-prefix format: "L:N01", "C:M8", "A:PNL", "W:Frame".
+        Can be branch-matched or single-branch (common to all units).
+    QtoName : str, optional
+        IFC quantity set name for the assembly Qto (default "Qto_Assembly").
     UnitId : GH DataTree or list, optional
         Explicit unit-id per branch.  When supplied, every MatData branch
         must have a matching entry (fail-fast validation).
@@ -489,12 +506,20 @@ def annotate_subassembly(
     # ── 1. Normalise tree-like inputs into branch dicts ─────────────────
     key_bd, _ = to_branch_dict_any(Key)
     val_bd, _ = to_branch_dict_any(Value)
+    qkey_bd, _ = to_branch_dict_any(QtoKey)
+    qval_bd, _ = to_branch_dict_any(QtoValue)
     uid_bd, _ = to_branch_dict_any(UnitId)
 
-    # ── 2. Detect common (single-branch) KV override ───────────────────
+    qto_name_str = str(unwrap_gh(QtoName) or "").strip() or DEFAULT_ASSEMBLY_QTO
+
+    # ── 2. Detect common (single-branch) KV overrides ──────────────────
     has_common, common_kv, common_err = _detect_common_override(key_bd, val_bd)
     if common_err:
         return MatData, f"assembly: invalid common override: {common_err}"
+
+    has_qto_common, common_qto_kv, qto_common_err = _detect_common_override(qkey_bd, qval_bd)
+    if qto_common_err:
+        return MatData, f"assembly: invalid common qto override: {qto_common_err}"
 
     # ── 3. Prepare output container matching input shape (Strategy S1) ──
     want_tree = is_datatree_like(MatData)
@@ -568,9 +593,20 @@ def annotate_subassembly(
         if not ok_kv:
             return MatData, f"assembly: {err}"
 
-        # 4d. If KV overrides exist, emit an AssemblyMeta payload
+        # 4c-qto. Resolve QtoKV overrides for this branch
+        ok_qto, qto_kv, qto_err = _pick_kv_for_unit_branch(
+            unit_path=p,
+            key_bd=qkey_bd,
+            val_bd=qval_bd,
+            has_common=has_qto_common,
+            common_kv=common_qto_kv,
+        )
+        if not ok_qto:
+            return MatData, f"assembly: {qto_err}"
+
+        # 4d. If KV or QtoKV overrides exist, emit an AssemblyMeta payload
         added_meta = 0
-        if kv:
+        if kv or qto_kv:
             # Fallback unit_id from UnitId input if the branch had none
             if not unit_id:
                 items = uid_bd.get(p, [])
@@ -585,6 +621,8 @@ def annotate_subassembly(
                 schema=schema,
                 sub_name=sub_name,
                 kv=kv,
+                qto_kv=qto_kv if qto_kv else None,
+                qto_name=qto_name_str,
             )
             # The meta payload itself must also be annotated so it
             # participates in further assembly levels (multi-level rule).
@@ -600,6 +638,7 @@ def annotate_subassembly(
                 "  [DEBUG] Created AssemblyMeta: "
                 f"path={p} unit_id={meta2.get('unit_id','')!r} "
                 f"pset_overrides={meta_props.get('pset_overrides', {})!r} "
+                f"qto_overrides={meta_props.get('qto_overrides', {})!r} "
                 f"assembly_path_depth={len(meta_props.get('assembly_path', []) or [])}"
             )
 

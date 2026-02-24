@@ -99,6 +99,35 @@ def merge_pset_overrides(
     return out
 
 
+def merge_qto_overrides(
+    base: Optional[Dict[str, Dict[str, Any]]],
+    extra: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Merge qto_overrides dicts.
+
+    Structure: {QtoName: {"L:N01": value, ...}}
+    Both base and extra follow this structure.
+    Keys within each QtoName are merged; last value wins for duplicates.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if isinstance(base, dict):
+        for qto_name, kv in base.items():
+            if isinstance(qto_name, str) and isinstance(kv, dict):
+                out[qto_name] = dict(kv)
+    if isinstance(extra, dict):
+        for qto_name, kv in extra.items():
+            if not isinstance(qto_name, str) or not qto_name.strip():
+                continue
+            if not isinstance(kv, dict):
+                continue
+            if qto_name not in out:
+                out[qto_name] = {}
+            for k, v in kv.items():
+                if isinstance(k, str) and k.strip():
+                    out[qto_name][k.strip()] = v
+    return out
+
+
 def apply_overrides_to_props(
     props: Dict[str, Any],
     override_obj: Any,
@@ -111,6 +140,7 @@ def apply_overrides_to_props(
     Handles:
     - pset_overrides: merged into props["pset_overrides"]
     - groups: merged into props["groups"] (union, no duplicates)
+    - qto_overrides: merged into props["qto_overrides"]
     - Other dict keys: ignored (reserved for future extensions)
     """
     if not isinstance(props, dict):
@@ -154,3 +184,15 @@ def apply_overrides_to_props(
 
             if merged_groups:
                 props["groups"] = merged_groups
+
+    # Handle qto_overrides
+    if "qto_overrides" in o:
+        qto_input = o["qto_overrides"]
+        if isinstance(qto_input, dict):
+            existing_qto = props.get("qto_overrides")
+            merged_qto = merge_qto_overrides(
+                existing_qto if isinstance(existing_qto, dict) else None,
+                qto_input,
+            )
+            if merged_qto:
+                props["qto_overrides"] = merged_qto
