@@ -1,7 +1,4 @@
-# Claude Code Working Agreement (GH -> IFC)
-
-> Migration note (2026-02-25): This repo now uses `AGENTS.md` as the default instruction file for Codex.
-> Keep this file for historical reference; update active workflow rules in `AGENTS.md`.
+# Codex Working Agreement (GH -> IFC)
 
 This repository is spec-driven.
 

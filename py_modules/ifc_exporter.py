@@ -42,6 +42,56 @@ from utils.exporter_utils import (
 )
 
 
+def resolve_display_name(payload: dict) -> str:
+    """Resolve a human-readable display label for IFC objects."""
+    if not isinstance(payload, dict):
+        return "UNNAMED"
+
+    name = payload.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+
+    props = payload.get("props")
+    if isinstance(props, dict):
+        element_code = props.get("element_code")
+        if isinstance(element_code, str) and element_code.strip():
+            return element_code.strip()
+
+        part_no = props.get("part_no")
+        if isinstance(part_no, str) and part_no.strip():
+            return part_no.strip()
+
+    return "UNNAMED"
+
+
+def resolve_stable_id(payload: dict, display_name: str) -> str:
+    """Resolve stable identifier used for IFC Tag."""
+    if isinstance(payload, dict):
+        unit_id = payload.get("unit_id")
+        if isinstance(unit_id, str) and unit_id.strip():
+            return unit_id.strip()
+    return str(display_name or "UNNAMED")
+
+
+def _apply_ifc_labels(obj: Any, payload: dict) -> None:
+    """Apply Name/ObjectType/Tag consistently where attributes are available."""
+    display_name = resolve_display_name(payload)
+    stable_id = resolve_stable_id(payload, display_name)
+
+    try:
+        obj.Name = display_name
+    except Exception:
+        pass
+    try:
+        obj.ObjectType = display_name
+    except Exception:
+        pass
+    try:
+        obj.Tag = stable_id
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------
 # Public API (DO NOT CHANGE signature)
 # ---------------------------------------------------------------------
@@ -99,6 +149,7 @@ def export_ifc_from_matdata(
             ifc_class="IfcProject",
             name=f"{storey_name_str}_Export",
         )
+        _apply_ifc_labels(project, {"name": f"{storey_name_str}_Export", "unit_id": storey_name_str})
 
         ifc_run("unit.assign_unit", model, length={"is_metric": True, "raw": "MILLIMETRE"})
 
@@ -115,6 +166,9 @@ def export_ifc_from_matdata(
         site = ifc_run("root.create_entity", model, ifc_class="IfcSite", name="Default Site")
         building = ifc_run("root.create_entity", model, ifc_class="IfcBuilding", name="Default Building")
         storey = ifc_run("root.create_entity", model, ifc_class="IfcBuildingStorey", name=storey_name_str)
+        _apply_ifc_labels(site, {"name": "Default Site", "unit_id": "Default Site"})
+        _apply_ifc_labels(building, {"name": "Default Building", "unit_id": "Default Building"})
+        _apply_ifc_labels(storey, {"name": storey_name_str, "unit_id": storey_name_str})
 
         try:
             storey.Elevation = float(StoreyElev)
@@ -269,7 +323,7 @@ def export_ifc_from_matdata(
         def create_element(payload: Payload) -> Any:
             props = ensure_props(payload)
 
-            name = str(payload.get("name", "Unnamed"))
+            name = resolve_display_name(payload)
             cat = str(payload.get("category", "Unspecified"))
 
             hint = props.get("ifc_class_hint")
@@ -292,6 +346,7 @@ def export_ifc_from_matdata(
                 )
 
             elem = ifc_run("root.create_entity", model, ifc_class=ifc_class, name=name)
+            _apply_ifc_labels(elem, payload)
 
             shape = ifc_run(
                 "geometry.add_mesh_representation",
@@ -397,6 +452,7 @@ def export_ifc_from_matdata(
 
         # Track payload → IFC element mapping for group assignment
         payload_to_elem: Dict[int, Any] = {}
+        labeled_assembly_nodes: set = set()
 
         for (scope, cid), items in containers.items():
             # Derive container name from outermost assembly_path level if available.
@@ -415,6 +471,7 @@ def export_ifc_from_matdata(
                 cname = container_display_name(scope, cid)
 
             container = ifc_run("root.create_entity", model, ifc_class="IfcElementAssembly", name=cname)
+            _apply_ifc_labels(container, {"name": cname, "unit_id": cid})
             created_containers += 1
 
             # container pset
@@ -479,6 +536,15 @@ def export_ifc_from_matdata(
                                 node_cache=node_cache,
                                 add_pset=add_pset,
                             )
+                            for asm_node in node_cache.values():
+                                key = id(asm_node)
+                                if key in labeled_assembly_nodes:
+                                    continue
+                                _apply_ifc_labels(
+                                    asm_node,
+                                    {"name": getattr(asm_node, "Name", "") or "UNNAMED", "unit_id": cid},
+                                )
+                                labeled_assembly_nodes.add(key)
                         else:
                             # Only outermost level existed -> overrides apply to container itself
                             deepest = container
@@ -546,6 +612,15 @@ def export_ifc_from_matdata(
                             node_cache=node_cache,
                             add_pset=add_pset,
                         )
+                        for asm_node in node_cache.values():
+                            key = id(asm_node)
+                            if key in labeled_assembly_nodes:
+                                continue
+                            _apply_ifc_labels(
+                                asm_node,
+                                {"name": getattr(asm_node, "Name", "") or "UNNAMED", "unit_id": cid},
+                            )
+                            labeled_assembly_nodes.add(key)
                         ifc_run("aggregate.assign_object", model, products=[elem], relating_object=deepest)
                     else:
                         # Only outermost level -> element goes directly under container
@@ -612,6 +687,7 @@ def export_ifc_from_matdata(
                 ifc_class="IfcGroup",
                 name=group_name,
             )
+            _apply_ifc_labels(ifc_group, {"name": group_name, "unit_id": group_name})
 
             # Assign elements to group
             ifc_run(
