@@ -323,7 +323,7 @@ def export_ifc_from_matdata(
         def create_element(payload: Payload) -> Any:
             props = ensure_props(payload)
 
-            name = resolve_display_name(payload)
+            name = resolve_display_name(payload) #type: ignore
             cat = str(payload.get("category", "Unspecified"))
 
             hint = props.get("ifc_class_hint")
@@ -346,7 +346,7 @@ def export_ifc_from_matdata(
                 )
 
             elem = ifc_run("root.create_entity", model, ifc_class=ifc_class, name=name)
-            _apply_ifc_labels(elem, payload)
+            _apply_ifc_labels(elem, payload) #type: ignore
 
             shape = ifc_run(
                 "geometry.add_mesh_representation",
