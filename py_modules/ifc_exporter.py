@@ -645,6 +645,33 @@ def export_ifc_from_matdata(
         # groups_dict: {group_name: [ifc_elements]}
         from collections import defaultdict
         groups_dict = defaultdict(list)
+        group_meta = defaultdict(lambda: {"pset_overrides": {}, "qto_overrides": {}})
+
+        def _merge_group_psets(dst: Dict[str, Dict[str, Any]], src: Any) -> None:
+            if not isinstance(src, dict):
+                return
+            for pset_name, kv in src.items():
+                if not isinstance(pset_name, str) or not pset_name.strip() or not isinstance(kv, dict):
+                    continue
+                pkey = pset_name.strip()
+                if pkey not in dst:
+                    dst[pkey] = {}
+                for k, v in kv.items():
+                    if isinstance(k, str) and k.strip():
+                        dst[pkey][k.strip()] = v
+
+        def _merge_group_qtos(dst: Dict[str, Dict[str, Any]], src: Any) -> None:
+            if not isinstance(src, dict):
+                return
+            for qto_name, kv in src.items():
+                if not isinstance(qto_name, str) or not qto_name.strip() or not isinstance(kv, dict):
+                    continue
+                qkey = qto_name.strip()
+                if qkey not in dst:
+                    dst[qkey] = {}
+                for k, v in kv.items():
+                    if isinstance(k, str) and k.strip():
+                        dst[qkey][k.strip()] = v
 
         # Collect groups from payloads using the payload → element mapping
         for pl in payloads:
@@ -673,6 +700,13 @@ def export_ifc_from_matdata(
                 group_name = str(group_name).strip()
                 if group_name:
                     groups_dict[group_name].append(elem)
+                    gmeta_src = props.get("group_overrides")
+                    if isinstance(gmeta_src, dict):
+                        one = gmeta_src.get(group_name)
+                        if isinstance(one, dict):
+                            gm = group_meta[group_name]
+                            _merge_group_psets(gm["pset_overrides"], one.get("pset_overrides"))
+                            _merge_group_qtos(gm["qto_overrides"], one.get("qto_overrides"))
 
         # Create IfcGroup entities
         created_groups = 0
@@ -688,6 +722,18 @@ def export_ifc_from_matdata(
                 name=group_name,
             )
             _apply_ifc_labels(ifc_group, {"name": group_name, "unit_id": group_name})
+
+            # Group-level metadata from ifc_allGroup (props.group_overrides)
+            gm = group_meta.get(group_name, {})
+            psets = gm.get("pset_overrides") if isinstance(gm, dict) else {}
+            if isinstance(psets, dict):
+                for pset_name, kv in psets.items():
+                    if isinstance(pset_name, str) and pset_name.strip() and isinstance(kv, dict):
+                        add_pset(ifc_group, pset_name.strip(), kv)
+
+            qtos = gm.get("qto_overrides") if isinstance(gm, dict) else {}
+            if isinstance(qtos, dict):
+                add_qto(ifc_group, qtos)
 
             # Assign elements to group
             ifc_run(
